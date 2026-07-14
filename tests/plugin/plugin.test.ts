@@ -20,7 +20,7 @@ describe("CaMe Codex plugin", () => {
 
     expect(manifest).toMatchObject({
       name: "came",
-      version: "0.1.0",
+      version: expect.stringMatching(/^0\.1\.0\+codex\.\d{14}$/u),
       skills: "./skills/",
       mcpServers: "./.mcp.json",
       interface: {
@@ -33,6 +33,11 @@ describe("CaMe Codex plugin", () => {
         "came-control": {
           type: "stdio",
           command: "came-mcp",
+          env_vars: [
+            "CAME_CONTROL_SOCKET",
+            "CAME_CONTROL_TOKEN",
+            "CAME_SESSION_ID",
+          ],
         },
       },
     });

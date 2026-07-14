@@ -1,6 +1,6 @@
 {
   "name": "came",
-  "version": "0.1.0",
+  "version": "0.1.0+codex.20260714062549",
   "description": "Autonomous same-thread model and reasoning-effort routing for Codex sessions.",
   "author": {
     "name": "CaMe"

@@ -27,7 +27,8 @@ import {
 export const CAME_SESSION_ID_ENV = "CAME_SESSION_ID";
 export const CAME_RUNTIME_DIR_ENV = "CAME_RUNTIME_DIR";
 export const CAME_TUI_AUTH_TOKEN_ENV = "CAME_TUI_AUTH_TOKEN";
-export const DEFAULT_STARTUP_TIMEOUT_MS = 10_000;
+export const DEFAULT_APP_SERVER_REQUEST_TIMEOUT_MS = 10_000;
+export const DEFAULT_STARTUP_TIMEOUT_MS = 60_000;
 export const DEFAULT_SHUTDOWN_GRACE_MS = 2_000;
 
 type RuntimeState = "idle" | "starting" | "running" | "stopping" | "stopped";
@@ -113,19 +114,19 @@ export class SessionRuntime {
         ...this.#options.env,
         [CAME_SESSION_ID_ENV]: sessionId,
         [CAME_RUNTIME_DIR_ENV]: this.#runtimeDir,
+        [CAME_CONTROL_SOCKET_ENV]: controlSocketPath,
+        [CAME_CONTROL_TOKEN_ENV]: controlToken,
       };
       const tuiEnv: NodeJS.ProcessEnv = {
         ...appServerEnv,
         [CAME_TUI_AUTH_TOKEN_ENV]: authToken,
-        [CAME_CONTROL_SOCKET_ENV]: controlSocketPath,
-        [CAME_CONTROL_TOKEN_ENV]: controlToken,
       };
 
       const spawnAppServer = this.#options.spawnAppServer ?? spawnCodexAppServer;
       const appServerOptions: SpawnAppServerOptions = {
         cwd,
         env: appServerEnv,
-        requestTimeoutMs: DEFAULT_STARTUP_TIMEOUT_MS,
+        requestTimeoutMs: DEFAULT_APP_SERVER_REQUEST_TIMEOUT_MS,
       };
       if (this.#options.codexCommand !== undefined) {
         appServerOptions.command = this.#options.codexCommand;

@@ -11,6 +11,8 @@ import {
   CAME_TUI_AUTH_TOKEN_ENV,
   CAME_CONTROL_SOCKET_ENV,
   CAME_CONTROL_TOKEN_ENV,
+  DEFAULT_APP_SERVER_REQUEST_TIMEOUT_MS,
+  DEFAULT_STARTUP_TIMEOUT_MS,
   SessionGatewayError,
   SessionRuntime,
   type SpawnAppServerOptions,
@@ -140,7 +142,8 @@ describe("SessionRuntime", () => {
     expect(harness.appOptions).toHaveLength(1);
     expect(harness.appOptions[0]?.env?.[CAME_SESSION_ID_ENV]).toMatch(/^[0-9a-f-]{36}$/u);
     expect(harness.appOptions[0]?.env?.[CAME_TUI_AUTH_TOKEN_ENV]).toBeUndefined();
-    expect(harness.appOptions[0]?.env?.[CAME_CONTROL_TOKEN_ENV]).toBeUndefined();
+    expect(harness.appOptions[0]?.env?.[CAME_CONTROL_SOCKET_ENV]).toBe(harness.tuiEnvironments[0]?.[CAME_CONTROL_SOCKET_ENV]);
+    expect(harness.appOptions[0]?.env?.[CAME_CONTROL_TOKEN_ENV]).toBe(harness.tuiEnvironments[0]?.[CAME_CONTROL_TOKEN_ENV]);
     expect(harness.tuiEnvironments[0]?.[CAME_SESSION_ID_ENV]).toBe(harness.appOptions[0]?.env?.[CAME_SESSION_ID_ENV]);
     expect(harness.tuiEnvironments[0]?.[CAME_TUI_AUTH_TOKEN_ENV]?.length).toBeGreaterThanOrEqual(32);
     expect(harness.runtimeDirs).toHaveLength(1);
@@ -247,6 +250,7 @@ describe("SessionRuntime", () => {
   });
 
   it("validates timeouts and idle stop semantics", async () => {
+    expect(DEFAULT_STARTUP_TIMEOUT_MS).toBeGreaterThan(DEFAULT_APP_SERVER_REQUEST_TIMEOUT_MS);
     expect(() => new SessionRuntime({ startupTimeoutMs: 0 })).toThrow(RangeError);
     expect(() => new SessionRuntime({ shutdownGraceMs: -1 })).toThrow(RangeError);
 
