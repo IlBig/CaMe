@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "bin": {
+    "came": "./dist/cli/came.js"
+  },
   "engines": {
     "node": ">=24.0.0"
   },
@@ -11,7 +14,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "test:app-server": "vitest run tests/app-server",
-    "test:foundation": "vitest run tests/foundation"
+    "test:foundation": "vitest run tests/foundation",
+    "test:runtime": "vitest run tests/runtime"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.29.0",
