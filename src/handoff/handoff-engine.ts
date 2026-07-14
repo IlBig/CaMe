@@ -27,6 +27,7 @@ import type {
 import {
   MAX_AUTONOMOUS_SWITCHES,
   type GovernanceController,
+  type HandoffFailureContext,
 } from "../governance/governance-controller.js";
 
 export const MAX_HANDOFF_CHAIN_SWITCHES = MAX_AUTONOMOUS_SWITCHES;
@@ -66,6 +67,7 @@ export class HandoffEngine implements ControlPlaneHandler {
   #closed = false;
   #fatalError: Error | null = null;
   #explicitModelCatalog: readonly CodexModel[] | null = null;
+  #failureContext: HandoffFailureContext | null = null;
 
   public constructor(options: HandoffEngineOptions) {
     z.uuid().parse(options.sessionId);
@@ -182,6 +184,7 @@ export class HandoffEngine implements ControlPlaneHandler {
     }
 
     const switchId = randomUUID();
+    this.#failureContext = { switchId, targetProfile: { ...target } };
     this.#state.routerState = "applying_settings";
     await this.#governance.recordExplicitSwitch(switchId, target, this.#state);
     await this.#bridge.updateThreadSettings({
@@ -193,6 +196,7 @@ export class HandoffEngine implements ControlPlaneHandler {
     this.#state.currentProfile = { ...target };
     await this.#governance.recordSettingsApplied(switchId, target, this.#state);
     this.#state.routerState = "idle";
+    this.#failureContext = null;
     return { status: "applied", profile: target };
   }
 
@@ -266,6 +270,7 @@ export class HandoffEngine implements ControlPlaneHandler {
     const switchId = randomUUID();
     const previousChainId = this.#state.chainId;
     const previousAutonomousSwitches = this.#state.autonomousSwitches;
+    this.#failureContext = { switchId, targetProfile: { ...target } };
     this.#pending = {
       switchId,
       threadId,
@@ -396,6 +401,7 @@ export class HandoffEngine implements ControlPlaneHandler {
     this.#state.routerState = "idle";
     this.#pending = null;
     await this.#governance.recordContinuationStarted(pending.switchId, pending.target, this.#state);
+    this.#failureContext = null;
   }
 
   #handleSettingsUpdated(params: z.infer<typeof threadSettingsUpdatedNotificationSchema>): void {
@@ -449,7 +455,7 @@ export class HandoffEngine implements ControlPlaneHandler {
     this.#state.routerState = "failed";
     let fatalError = error;
     try {
-      await this.#governance.recordFailure(error, this.#state);
+      await this.#governance.recordFailure(error, this.#state, this.#failureContext ?? undefined);
     } catch (auditError) {
       fatalError = new AggregateError([error, auditError], "Handoff and audit failed");
     }

@@ -370,6 +370,15 @@ describe("HandoffEngine", () => {
       await expect(applying).rejects.toThrow("settings denied");
       await expect.poll(() => harness.fatalErrors.length).toBe(1);
       await expect(harness.engine.getState(context())).resolves.toMatchObject({ routerState: "failed" });
+      const scheduled = harness.auditEvents.find((event) => event.event === "switch_scheduled");
+      expect(scheduled).toMatchObject({
+        switchId: expect.any(String),
+        targetProfile: { model: MODEL_B.model, effort: "xhigh" },
+      });
+      expect(harness.auditEvents.find((event) => event.event === "handoff_failed")).toMatchObject({
+        switchId: scheduled?.switchId,
+        targetProfile: { model: MODEL_B.model, effort: "xhigh" },
+      });
     } finally {
       await closeHarness(harness);
     }
@@ -719,6 +728,15 @@ describe("HandoffEngine", () => {
       await expect.poll(() => harness.fatalErrors.length).toBe(1);
       expect(harness.fatalErrors[0]).toBeInstanceOf(HandoffEngineError);
       await expect(harness.engine.getState(context())).resolves.toMatchObject({ routerState: "failed" });
+      const scheduled = harness.auditEvents.find((event) => event.event === "switch_scheduled");
+      expect(scheduled).toMatchObject({
+        switchId: expect.any(String),
+        targetProfile: { model: MODEL_B.model, effort: "xhigh" },
+      });
+      expect(harness.auditEvents.find((event) => event.event === "handoff_failed")).toMatchObject({
+        switchId: scheduled?.switchId,
+        targetProfile: { model: MODEL_B.model, effort: "xhigh" },
+      });
 
       JsonLinePeer.write(harness.fromServer, {
         method: "turn/completed",

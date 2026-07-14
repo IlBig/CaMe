@@ -1,4 +1,4 @@
-import { timingSafeEqual } from "node:crypto";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 import type { IncomingMessage } from "node:http";
 
 import { WebSocket, WebSocketServer, type RawData } from "ws";
@@ -29,6 +29,7 @@ const EXPLICIT_EFFORTS = new Set([
   "ultra",
   "max",
 ]);
+const EXPLICIT_PROFILE_LINE_SEPARATOR = /[\r\n\u2028\u2029]/u;
 
 export type ExplicitProfileHandler = (request: ExplicitProfileRequest) => Promise<ExplicitProfileResult>;
 
@@ -227,6 +228,7 @@ export class WebSocketGateway {
   }
 
   async #interceptExplicitProfileCommand(message: JsonRpcRequest): Promise<boolean> {
+    const startedAtMs = Date.now();
     const inspection = inspectExplicitProfileCommand(message);
     if (inspection.status === "not_command") {
       return false;
@@ -251,8 +253,59 @@ export class WebSocketGateway {
       this.#sendRequestError(message.id, -32040, "CaMe returned an invalid explicit profile");
       return true;
     }
-    await this.#bridge.forwardClientMessage(rewriteExplicitProfileCommand(message, result.profile));
+    this.#sendExplicitProfileCompletion(
+      message.id,
+      inspection.request.threadId,
+      result.profile,
+      startedAtMs,
+    );
     return true;
+  }
+
+  #sendExplicitProfileCompletion(
+    id: JsonRpcRequest["id"],
+    threadId: string,
+    profile: ModelProfile,
+    startedAtMs: number,
+  ): void {
+    const completedAtMs = Date.now();
+    const turnId = randomUUID();
+    const itemId = randomUUID();
+    const startedAt = Math.floor(startedAtMs / 1_000);
+    const completedAt = Math.floor(completedAtMs / 1_000);
+    const initialTurn = {
+      id: turnId,
+      items: [],
+      itemsView: "notLoaded",
+      status: "inProgress",
+      error: null,
+      startedAt: null,
+      completedAt: null,
+      durationMs: null,
+    };
+    const startedTurn = {
+      ...initialTurn,
+      startedAt,
+    };
+    const item = {
+      type: "agentMessage",
+      id: itemId,
+      text: `Profilo attivo: ${profile.model}/${profile.effort}.`,
+      phase: "final_answer",
+      memoryCitation: null,
+    };
+    const completedTurn = {
+      ...startedTurn,
+      status: "completed",
+      completedAt,
+      durationMs: Math.max(0, completedAtMs - startedAtMs),
+    };
+
+    this.#sendToClient({ id, result: { turn: initialTurn } });
+    this.#sendToClient({ method: "turn/started", params: { threadId, turn: startedTurn } });
+    this.#sendToClient({ method: "item/started", params: { threadId, turnId, item, startedAtMs } });
+    this.#sendToClient({ method: "item/completed", params: { threadId, turnId, item, completedAtMs } });
+    this.#sendToClient({ method: "turn/completed", params: { threadId, turn: completedTurn } });
   }
 
   #sendRequestError(id: JsonRpcRequest["id"], code: number, message: string, data?: unknown): void {
@@ -369,15 +422,15 @@ function inspectExplicitProfileCommand(message: JsonRpcRequest): ExplicitCommand
 
 export function parseExplicitProfileCommand(text: string): ParsedExplicitCommand {
   const trimmed = text.trim();
-  const prefix = /^(?:cambia|imposta)\s+(?:il\s+)?modello\b(?<remainder>.*)$/iu.exec(trimmed)
-    ?? /^(?:change|switch|set)\s+(?:the\s+)?model\b(?<remainder>.*)$/iu.exec(trimmed);
+  const prefix = /^(?:cambia|imposta)\s+(?:il\s+)?modello\b/iu.exec(trimmed)
+    ?? /^(?:change|switch|set)\s+(?:the\s+)?model\b/iu.exec(trimmed);
   if (prefix === null) {
     return { status: "not_command" };
   }
-  if (trimmed.length > MAX_EXPLICIT_PROFILE_COMMAND_LENGTH) {
+  if (trimmed.length > MAX_EXPLICIT_PROFILE_COMMAND_LENGTH || EXPLICIT_PROFILE_LINE_SEPARATOR.test(trimmed)) {
     return { status: "invalid" };
   }
-  const remainder = (prefix.groups?.["remainder"] ?? "")
+  const remainder = trimmed.slice(prefix[0].length)
     .replace(/^\s*(?:(?:in|a|su|to)\s+)?/iu, "")
     .replace(/[.!]$/u, "")
     .trim();
@@ -394,38 +447,6 @@ export function parseExplicitProfileCommand(text: string): ParsedExplicitCommand
     return { status: "invalid" };
   }
   return { status: "command", modelQuery, effort };
-}
-
-function rewriteExplicitProfileCommand(message: JsonRpcRequest, profile: ModelProfile): JsonRpcRequest {
-  const params = message.params as Record<string, unknown>;
-  return {
-    ...message,
-    params: {
-      ...params,
-      model: profile.model,
-      effort: profile.effort,
-      collaborationMode: rewriteCollaborationMode(params["collaborationMode"], profile),
-      input: [{
-        type: "text",
-        text: `Conferma soltanto: Profilo attivo: ${profile.model}/${profile.effort}. Non chiamare strumenti.`,
-        text_elements: [],
-      }],
-    },
-  };
-}
-
-function rewriteCollaborationMode(value: unknown, profile: ModelProfile): unknown {
-  if (!isRecord(value) || !isRecord(value["settings"])) {
-    return value;
-  }
-  return {
-    ...value,
-    settings: {
-      ...value["settings"],
-      model: profile.model,
-      reasoning_effort: profile.effort,
-    },
-  };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

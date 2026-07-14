@@ -40,6 +40,11 @@ export type GovernanceControllerOptions = {
   fingerprintKey?: Buffer;
 };
 
+export type HandoffFailureContext = Readonly<{
+  switchId: string;
+  targetProfile: ModelProfile;
+}>;
+
 export class GovernanceController {
   readonly #sessionId: string;
   readonly #auditSink: AuditSink;
@@ -296,13 +301,19 @@ export class GovernanceController {
     });
   }
 
-  public recordFailure(error: Error, state: SessionState): Promise<void> {
+  public recordFailure(
+    error: Error,
+    state: SessionState,
+    context?: HandoffFailureContext,
+  ): Promise<void> {
     this.#assertState(state);
     return this.#auditSink.record({
       event: "handoff_failed",
+      switchId: context?.switchId,
       chainId: state.chainId,
       threadId: state.activeThreadId ?? undefined,
       turnId: state.activeTurnId ?? undefined,
+      targetProfile: context?.targetProfile,
       errorName: error.name,
     });
   }
