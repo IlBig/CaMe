@@ -4,7 +4,8 @@
   "private": true,
   "type": "module",
   "bin": {
-    "came": "./dist/cli/came.js"
+    "came": "./dist/cli/came.js",
+    "came-mcp": "./dist/cli/came-mcp.js"
   },
   "engines": {
     "node": ">=24.0.0"
@@ -15,6 +16,7 @@
     "test": "vitest run",
     "test:app-server": "vitest run tests/app-server",
     "test:foundation": "vitest run tests/foundation",
+    "test:control-plane": "vitest run tests/control-plane",
     "test:runtime": "vitest run tests/runtime"
   },
   "dependencies": {
