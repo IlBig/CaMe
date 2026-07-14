@@ -10,6 +10,8 @@ import { describe, expect, it } from "vitest";
 
 import {
   AppServerBridge,
+  AUTONOMOUS_SWITCH_CONTINUATION,
+  AUTONOMOUS_SWITCH_REASON,
   ControlPlaneClient,
   ControlPlaneServer,
   GovernanceController,
@@ -39,8 +41,6 @@ const TARGET_MODEL: CodexModel = {
 const SWITCH_ARGUMENTS = {
   model: TARGET_MODEL.id,
   effort: "xhigh",
-  reason: "Integrated verification requires deeper reasoning",
-  continuation: "Resume the integrated verification at the exact next assertion",
 };
 
 type FullStackHarness = {
@@ -191,7 +191,7 @@ describe("CaMe integrated stack", () => {
         method: "turn/start",
         params: {
           threadId: "thread-1",
-          input: [{ type: "text", text: SWITCH_ARGUMENTS.continuation }],
+          input: [{ type: "text", text: AUTONOMOUS_SWITCH_CONTINUATION }],
           model: TARGET_MODEL.model,
           effort: "xhigh",
         },
@@ -223,8 +223,8 @@ describe("CaMe integrated stack", () => {
         "settings_applied",
         "continuation_started",
       ]);
-      expect(auditText).not.toContain(SWITCH_ARGUMENTS.reason);
-      expect(auditText).not.toContain(SWITCH_ARGUMENTS.continuation);
+      expect(auditText).not.toContain(AUTONOMOUS_SWITCH_REASON);
+      expect(auditText).not.toContain(AUTONOMOUS_SWITCH_CONTINUATION);
       expect((await stat(harness.auditPath)).mode & 0o777).toBe(0o600);
       expect(harness.fatalErrors).toEqual([]);
     } finally {

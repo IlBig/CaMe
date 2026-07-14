@@ -21,6 +21,18 @@ export const modelProfileSchema = z.object({
 
 export type ModelProfile = z.infer<typeof modelProfileSchema>;
 
+export const explicitProfileRequestSchema = z.object({
+  threadId: z.string().trim().min(1),
+  modelQuery: z.string().trim().min(1).max(128),
+  effort: z.string().trim().min(1).max(32),
+}).strict();
+
+export type ExplicitProfileRequest = z.infer<typeof explicitProfileRequestSchema>;
+
+export type ExplicitProfileResult =
+  | Readonly<{ status: "applied" | "noop"; profile: ModelProfile }>
+  | Readonly<{ status: "rejected"; code: string; message: string }>;
+
 export const switchRequestSchema = z.object({
   model: z.string().trim().min(1),
   effort: z.string().trim().min(1),

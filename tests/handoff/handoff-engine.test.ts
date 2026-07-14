@@ -12,6 +12,7 @@ import {
   type AuditSink,
   type CodexModel,
   type ControlPlaneRequestContext,
+  type ExplicitProfileRequest,
   type SessionState,
   type SwitchRequest,
 } from "../../src/index.js";
@@ -172,6 +173,208 @@ async function completeHandoff(
 }
 
 describe("HandoffEngine", () => {
+  it("applies explicit profiles on an idle thread and reuses the validated catalog", async () => {
+    const harness = createHarness();
+    const modelSol: CodexModel = {
+      ...MODEL_B,
+      id: "gpt-5.6-sol",
+      model: "gpt-5.6-sol",
+      displayName: "GPT-5.6 Sol",
+      supportedReasoningEfforts: [
+        ...MODEL_B.supportedReasoningEfforts,
+        { reasoningEffort: "ultra", description: "Ultra" },
+      ],
+    };
+    try {
+      await initialize(harness);
+      JsonLinePeer.write(harness.fromServer, {
+        method: "thread/settings/updated",
+        params: {
+          threadId: "thread-1",
+          threadSettings: { model: MODEL_A.model, effort: "medium" },
+        },
+      });
+      await expect(harness.engine.getState(context())).resolves.toMatchObject({
+        activeThreadId: "thread-1",
+        activeTurnId: null,
+      });
+
+      const applying = harness.engine.applyExplicitProfile({
+        threadId: "thread-1",
+        modelQuery: "5.6 sol",
+        effort: "ultra",
+      });
+      await respondWithModels(harness, [MODEL_A, modelSol]);
+      const firstUpdate = await harness.peer.next();
+      expect(firstUpdate).toMatchObject({
+        method: "thread/settings/update",
+        params: { threadId: "thread-1", model: "gpt-5.6-sol", effort: "ultra" },
+      });
+      JsonLinePeer.write(harness.fromServer, { id: firstUpdate["id"], result: {} });
+      await expect(applying).resolves.toEqual({
+        status: "applied",
+        profile: { model: "gpt-5.6-sol", effort: "ultra" },
+      });
+
+      const applyingCached = harness.engine.applyExplicitProfile({
+        threadId: "thread-1",
+        modelQuery: "model a",
+        effort: "medium",
+      });
+      const secondUpdate = await harness.peer.next();
+      expect(secondUpdate).toMatchObject({
+        method: "thread/settings/update",
+        params: { threadId: "thread-1", model: MODEL_A.model, effort: "medium" },
+      });
+      JsonLinePeer.write(harness.fromServer, { id: secondUpdate["id"], result: {} });
+      await expect(applyingCached).resolves.toEqual({
+        status: "applied",
+        profile: { model: MODEL_A.model, effort: "medium" },
+      });
+
+      await expect(harness.engine.getState(context())).resolves.toMatchObject({
+        currentProfile: { model: MODEL_A.model, effort: "medium" },
+        chainId: null,
+        autonomousSwitches: 0,
+        routerState: "idle",
+      });
+      expect(harness.auditEvents.filter((event) => event.decision === "explicit")).toHaveLength(4);
+      expect(harness.auditEvents.filter((event) => event.event === "settings_applied")).toHaveLength(2);
+      expect(harness.fatalErrors).toEqual([]);
+    } finally {
+      await closeHarness(harness);
+    }
+  });
+
+  it("rejects invalid, cross-thread, and in-turn explicit profile requests without failing", async () => {
+    const harness = createHarness();
+    try {
+      await initialize(harness);
+      await expect(harness.engine.applyExplicitProfile({
+        threadId: "",
+        modelQuery: "model b",
+        effort: "xhigh",
+      } as ExplicitProfileRequest)).resolves.toMatchObject({
+        status: "rejected",
+        code: "invalid_explicit_command",
+      });
+
+      JsonLinePeer.write(harness.fromServer, {
+        method: "thread/settings/updated",
+        params: {
+          threadId: "thread-1",
+          threadSettings: { model: MODEL_A.model, effort: "medium" },
+        },
+      });
+      await harness.engine.getState(context());
+      await expect(harness.engine.applyExplicitProfile({
+        threadId: "thread-2",
+        modelQuery: "model b",
+        effort: "xhigh",
+      })).resolves.toMatchObject({ status: "rejected", code: "thread_mismatch" });
+
+      await activateTurn(harness);
+      await expect(harness.engine.applyExplicitProfile({
+        threadId: "thread-1",
+        modelQuery: "model b",
+        effort: "xhigh",
+      })).resolves.toMatchObject({ status: "rejected", code: "turn_in_progress" });
+      await expect(harness.engine.getState(context())).resolves.toMatchObject({ routerState: "idle" });
+      expect(harness.fatalErrors).toEqual([]);
+    } finally {
+      await closeHarness(harness);
+    }
+  });
+
+  it("rejects unsafe catalog profiles before updating thread settings", async () => {
+    const harness = createHarness();
+    try {
+      await initialize(harness);
+      const applying = harness.engine.applyExplicitProfile({
+        threadId: "thread-1",
+        modelQuery: "unsafe-id",
+        effort: "high",
+      });
+      await respondWithModels(harness, [{
+        ...MODEL_B,
+        id: "unsafe-id",
+        model: "unsafe\nprofile",
+      }]);
+
+      await expect(applying).resolves.toMatchObject({
+        status: "rejected",
+        code: "invalid_catalog_profile",
+      });
+      await expect(harness.engine.getState(context())).resolves.toMatchObject({ routerState: "idle" });
+      expect(harness.fatalErrors).toEqual([]);
+    } finally {
+      await closeHarness(harness);
+    }
+  });
+
+  it.each([
+    {
+      label: "hidden model",
+      models: [{ ...MODEL_B, hidden: true }],
+      request: { threadId: "thread-1", modelQuery: MODEL_B.id, effort: "xhigh" },
+      code: "unsupported_model",
+    },
+    {
+      label: "ambiguous model alias",
+      models: [
+        { ...MODEL_A, displayName: "Shared Model" },
+        { ...MODEL_B, displayName: "Shared Model" },
+      ],
+      request: { threadId: "thread-1", modelQuery: "shared model", effort: "medium" },
+      code: "ambiguous_model",
+    },
+    {
+      label: "unsupported effort",
+      models: [MODEL_B],
+      request: { threadId: "thread-1", modelQuery: MODEL_B.id, effort: "ultra" },
+      code: "unsupported_effort",
+    },
+  ])("rejects $label from the explicit model catalog", async ({ models, request, code }) => {
+    const harness = createHarness();
+    try {
+      await initialize(harness);
+      const applying = harness.engine.applyExplicitProfile(request);
+      await respondWithModels(harness, models);
+
+      await expect(applying).resolves.toMatchObject({ status: "rejected", code });
+      await expect(harness.engine.getState(context())).resolves.toMatchObject({ routerState: "idle" });
+      expect(harness.auditEvents.some((event) => event.decision === "explicit")).toBe(false);
+      expect(harness.fatalErrors).toEqual([]);
+    } finally {
+      await closeHarness(harness);
+    }
+  });
+
+  it("fails closed when an explicit settings update is rejected", async () => {
+    const harness = createHarness();
+    try {
+      await initialize(harness);
+      const applying = harness.engine.applyExplicitProfile({
+        threadId: "thread-1",
+        modelQuery: MODEL_B.id,
+        effort: "xhigh",
+      });
+      await respondWithModels(harness, [MODEL_B]);
+      const update = await harness.peer.next();
+      expect(update).toMatchObject({ method: "thread/settings/update" });
+      JsonLinePeer.write(harness.fromServer, {
+        id: update["id"],
+        error: { code: -32000, message: "settings denied" },
+      });
+
+      await expect(applying).rejects.toThrow("settings denied");
+      await expect.poll(() => harness.fatalErrors.length).toBe(1);
+      await expect(harness.engine.getState(context())).resolves.toMatchObject({ routerState: "failed" });
+    } finally {
+      await closeHarness(harness);
+    }
+  });
+
   it("updates settings and starts the continuation on the same thread", async () => {
     const harness = createHarness();
     try {

@@ -4,9 +4,33 @@ import type { IncomingMessage } from "node:http";
 import { WebSocket, WebSocketServer, type RawData } from "ws";
 
 import type { AppServerBridge } from "../app-server/app-server-bridge.js";
-import type { JsonRpcMessage } from "../app-server/protocol.js";
+import {
+  isJsonRpcRequest,
+  parseJsonRpcMessage,
+  type JsonRpcMessage,
+  type JsonRpcRequest,
+} from "../app-server/protocol.js";
+import type {
+  ExplicitProfileRequest,
+  ExplicitProfileResult,
+  ModelProfile,
+} from "../contracts.js";
 
 export const DEFAULT_GATEWAY_MAX_PAYLOAD_BYTES = 16 * 1024 * 1024;
+export const MAX_EXPLICIT_PROFILE_COMMAND_LENGTH = 256;
+
+const EXPLICIT_EFFORTS = new Set([
+  "none",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "ultra",
+  "max",
+]);
+
+export type ExplicitProfileHandler = (request: ExplicitProfileRequest) => Promise<ExplicitProfileResult>;
 
 type ConnectionWaiter = {
   resolve: () => void;
@@ -32,6 +56,7 @@ export class WebSocketGateway {
   readonly #bridge: AppServerBridge;
   readonly #authToken: string;
   readonly #fatalListener: (error: Error) => void;
+  readonly #explicitProfileHandler: ExplicitProfileHandler | undefined;
   readonly #connectionWaiters = new Set<ConnectionWaiter>();
   #server: WebSocketServer | null = null;
   #client: WebSocket | null = null;
@@ -42,13 +67,19 @@ export class WebSocketGateway {
   #closing = false;
   #failed = false;
 
-  public constructor(bridge: AppServerBridge, authToken: string, fatalListener: (error: Error) => void) {
+  public constructor(
+    bridge: AppServerBridge,
+    authToken: string,
+    fatalListener: (error: Error) => void,
+    explicitProfileHandler?: ExplicitProfileHandler,
+  ) {
     if (authToken.length < 32) {
       throw new RangeError("Gateway authentication token must contain at least 32 characters");
     }
     this.#bridge = bridge;
     this.#authToken = authToken;
     this.#fatalListener = fatalListener;
+    this.#explicitProfileHandler = explicitProfileHandler;
   }
 
   public async start(): Promise<string> {
@@ -185,7 +216,50 @@ export class WebSocketGateway {
         ? data.toString("utf8")
         : Buffer.from(data).toString("utf8");
     const value: unknown = JSON.parse(text);
-    await this.#bridge.forwardClientMessage(value);
+    const message = parseJsonRpcMessage(value);
+    if (isJsonRpcRequest(message) && message.method === "turn/start") {
+      const intercepted = await this.#interceptExplicitProfileCommand(message);
+      if (intercepted) {
+        return;
+      }
+    }
+    await this.#bridge.forwardClientMessage(message);
+  }
+
+  async #interceptExplicitProfileCommand(message: JsonRpcRequest): Promise<boolean> {
+    const inspection = inspectExplicitProfileCommand(message);
+    if (inspection.status === "not_command") {
+      return false;
+    }
+    if (inspection.status === "invalid") {
+      this.#sendRequestError(message.id, -32602, inspection.message);
+      return true;
+    }
+    if (this.#explicitProfileHandler === undefined) {
+      this.#sendRequestError(message.id, -32040, "CaMe explicit profile routing is unavailable");
+      return true;
+    }
+
+    const result = await this.#explicitProfileHandler(inspection.request);
+    if (result.status === "rejected") {
+      this.#sendRequestError(message.id, -32040, result.message, { cameCode: result.code });
+      return true;
+    }
+    if (!isSafeProfileToken(result.profile.model)
+      || !EXPLICIT_EFFORTS.has(result.profile.effort)
+      || result.profile.effort !== inspection.request.effort) {
+      this.#sendRequestError(message.id, -32040, "CaMe returned an invalid explicit profile");
+      return true;
+    }
+    await this.#bridge.forwardClientMessage(rewriteExplicitProfileCommand(message, result.profile));
+    return true;
+  }
+
+  #sendRequestError(id: JsonRpcRequest["id"], code: number, message: string, data?: unknown): void {
+    this.#sendToClient({
+      id,
+      error: data === undefined ? { code, message } : { code, message, data },
+    });
   }
 
   #sendToClient(message: JsonRpcMessage): void {
@@ -248,4 +322,116 @@ class AppServerMessageError extends Error {
     super(message);
     this.name = "AppServerMessageError";
   }
+}
+
+type ExplicitCommandInspection =
+  | Readonly<{ status: "not_command" }>
+  | Readonly<{ status: "invalid"; message: string }>
+  | Readonly<{ status: "command"; request: ExplicitProfileRequest }>;
+
+type ParsedExplicitCommand =
+  | Readonly<{ status: "not_command" }>
+  | Readonly<{ status: "invalid" }>
+  | Readonly<{ status: "command"; modelQuery: string; effort: string }>;
+
+function inspectExplicitProfileCommand(message: JsonRpcRequest): ExplicitCommandInspection {
+  if (!isRecord(message.params) || !Array.isArray(message.params["input"])) {
+    return { status: "not_command" };
+  }
+  const input = message.params["input"];
+  const parsedCommands = input
+    .filter((item): item is Record<string, unknown> => isRecord(item) && item["type"] === "text" && typeof item["text"] === "string")
+    .map((item) => parseExplicitProfileCommand(item["text"] as string))
+    .filter((parsed) => parsed.status !== "not_command");
+  if (parsedCommands.length === 0) {
+    return { status: "not_command" };
+  }
+  if (input.length !== 1 || parsedCommands.length !== 1) {
+    return { status: "invalid", message: "An explicit profile command must be the only turn input" };
+  }
+  const parsed = parsedCommands[0];
+  if (parsed === undefined || parsed.status === "invalid") {
+    return { status: "invalid", message: "Invalid explicit profile command" };
+  }
+  const threadId = message.params["threadId"];
+  if (typeof threadId !== "string" || threadId.trim() === "") {
+    return { status: "invalid", message: "An explicit profile command requires a thread id" };
+  }
+  return {
+    status: "command",
+    request: {
+      threadId,
+      modelQuery: parsed.modelQuery,
+      effort: parsed.effort,
+    },
+  };
+}
+
+export function parseExplicitProfileCommand(text: string): ParsedExplicitCommand {
+  const trimmed = text.trim();
+  const prefix = /^(?:cambia|imposta)\s+(?:il\s+)?modello\b(?<remainder>.*)$/iu.exec(trimmed)
+    ?? /^(?:change|switch|set)\s+(?:the\s+)?model\b(?<remainder>.*)$/iu.exec(trimmed);
+  if (prefix === null) {
+    return { status: "not_command" };
+  }
+  if (trimmed.length > MAX_EXPLICIT_PROFILE_COMMAND_LENGTH) {
+    return { status: "invalid" };
+  }
+  const remainder = (prefix.groups?.["remainder"] ?? "")
+    .replace(/^\s*(?:(?:in|a|su|to)\s+)?/iu, "")
+    .replace(/[.!]$/u, "")
+    .trim();
+  const tokens = remainder.split(/\s+/u);
+  if (tokens.length < 2) {
+    return { status: "invalid" };
+  }
+  const effort = tokens.at(-1)?.toLowerCase();
+  if (effort === undefined || !EXPLICIT_EFFORTS.has(effort)) {
+    return { status: "invalid" };
+  }
+  const modelQuery = tokens.slice(0, -1).join(" ");
+  if (modelQuery.length === 0 || modelQuery.length > 128) {
+    return { status: "invalid" };
+  }
+  return { status: "command", modelQuery, effort };
+}
+
+function rewriteExplicitProfileCommand(message: JsonRpcRequest, profile: ModelProfile): JsonRpcRequest {
+  const params = message.params as Record<string, unknown>;
+  return {
+    ...message,
+    params: {
+      ...params,
+      model: profile.model,
+      effort: profile.effort,
+      collaborationMode: rewriteCollaborationMode(params["collaborationMode"], profile),
+      input: [{
+        type: "text",
+        text: `Conferma soltanto: Profilo attivo: ${profile.model}/${profile.effort}. Non chiamare strumenti.`,
+        text_elements: [],
+      }],
+    },
+  };
+}
+
+function rewriteCollaborationMode(value: unknown, profile: ModelProfile): unknown {
+  if (!isRecord(value) || !isRecord(value["settings"])) {
+    return value;
+  }
+  return {
+    ...value,
+    settings: {
+      ...value["settings"],
+      model: profile.model,
+      reasoning_effort: profile.effort,
+    },
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isSafeProfileToken(value: string): boolean {
+  return /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u.test(value);
 }

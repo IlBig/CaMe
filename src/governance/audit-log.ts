@@ -24,6 +24,7 @@ export const auditDecisionSchema = z.enum([
   "stale_context",
   "confirmed",
   "autonomous",
+  "explicit",
   "new_turn",
   "new_turn_confirmation_invalidated",
   "expired",

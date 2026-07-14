@@ -137,17 +137,18 @@ export class SessionRuntime {
       this.#appServer = spawnAppServer(appServerOptions);
       this.#appServer.bridge.onClose((error) => this.#fail(new SessionRuntimeError("Codex App Server stopped", { cause: error })));
 
-      this.#handoffEngine = new HandoffEngine({
+      const handoffEngine = new HandoffEngine({
         sessionId,
         bridge: this.#appServer.bridge,
         governance: new GovernanceController({ sessionId, auditSink: this.#auditLog }),
         onFatalError: (error) => this.#fail(new SessionRuntimeError("Model handoff failed", { cause: error })),
       });
+      this.#handoffEngine = handoffEngine;
       this.#controlServer = new ControlPlaneServer({
         socketPath: controlSocketPath,
         sessionId,
         authToken: controlToken,
-        handler: this.#handoffEngine,
+        handler: handoffEngine,
         onFatalError: (error) => this.#fail(new SessionRuntimeError("MCP control plane failed", { cause: error })),
       });
       await this.#controlServer.start();
@@ -164,6 +165,7 @@ export class SessionRuntime {
         (error) => {
           void this.#handleGatewayFailure(error);
         },
+        (request) => handoffEngine.applyExplicitProfile(request),
       );
       const remoteAddress = await this.#gateway.start();
       if (this.#terminalError !== null) {

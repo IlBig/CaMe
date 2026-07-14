@@ -229,6 +229,34 @@ export class GovernanceController {
     });
   }
 
+  public async recordExplicitSwitch(
+    switchId: string,
+    target: ModelProfile,
+    state: SessionState,
+  ): Promise<void> {
+    this.#assertState(state);
+    await this.#auditSink.record({
+      event: "switch_requested",
+      switchId,
+      chainId: state.chainId,
+      threadId: state.activeThreadId ?? undefined,
+      sourceProfile: state.currentProfile,
+      targetProfile: target,
+      decision: "explicit",
+      reasonLength: 0,
+      continuationLength: 0,
+    });
+    await this.#auditSink.record({
+      event: "switch_scheduled",
+      switchId,
+      chainId: state.chainId,
+      threadId: state.activeThreadId ?? undefined,
+      sourceProfile: state.currentProfile,
+      targetProfile: target,
+      decision: "explicit",
+    });
+  }
+
   public recordSettingsApplied(switchId: string, target: ModelProfile, state: SessionState): Promise<void> {
     this.#assertState(state);
     return this.#auditSink.record({

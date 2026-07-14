@@ -7,7 +7,6 @@ import { z } from "zod";
 import {
   confirmSwitchRequestSchema,
   sessionStateSchema,
-  switchRequestSchema,
   switchResultSchema,
 } from "../contracts.js";
 import { ControlPlaneClient } from "../control-plane/ipc-client.js";
@@ -19,6 +18,14 @@ import { CAME_SESSION_ID_ENV } from "../runtime/session-runtime.js";
 
 export const CONTROL_MCP_SERVER_NAME = "came-control";
 export const CONTROL_MCP_SERVER_VERSION = "0.1.0";
+export const AUTONOMOUS_SWITCH_REASON = "autonomous_profile_routing";
+export const AUTONOMOUS_SWITCH_CONTINUATION =
+  "Continue the current task in this same thread from the exact next unfinished action. Do not repeat completed work.";
+
+const switchToolInputSchema = z.object({
+  model: z.string().trim().min(1),
+  effort: z.string().trim().min(1),
+}).strict();
 
 const switchToolOutputSchema = z.object({
   status: z.enum(["scheduled", "confirmation_required", "noop", "rejected"]),
@@ -44,7 +51,7 @@ export function createControlMcpServer(client: ControlPlaneClient): McpServer {
   server.registerTool("came_switch_model", {
     title: "Schedule CaMe model switch",
     description: "Schedule an autonomous model and reasoning-effort handoff in the current Codex thread.",
-    inputSchema: switchRequestSchema,
+    inputSchema: switchToolInputSchema,
     outputSchema: switchToolOutputSchema,
     annotations: {
       readOnlyHint: false,
@@ -52,7 +59,12 @@ export function createControlMcpServer(client: ControlPlaneClient): McpServer {
       idempotentHint: false,
       openWorldHint: false,
     },
-  }, async (request, extra) => formatToolResult(await client.switchModel(request, extra.signal)));
+  }, async (request, extra) => formatToolResult(await client.switchModel({
+    model: request.model,
+    effort: request.effort,
+    reason: AUTONOMOUS_SWITCH_REASON,
+    continuation: AUTONOMOUS_SWITCH_CONTINUATION,
+  }, extra.signal)));
 
   server.registerTool("came_confirm_switch", {
     title: "Confirm CaMe model switch",

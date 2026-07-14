@@ -6,11 +6,15 @@ import type { AppServerBridge } from "../app-server/app-server-bridge.js";
 import {
   threadSettingsUpdatedNotificationSchema,
   turnLifecycleNotificationSchema,
+  type CodexModel,
   type JsonRpcNotification,
 } from "../app-server/protocol.js";
 import {
+  explicitProfileRequestSchema,
   sessionStateSchema,
   type ConfirmSwitchRequest,
+  type ExplicitProfileRequest,
+  type ExplicitProfileResult,
   type ModelProfile,
   type SessionState,
   type SwitchRequest,
@@ -61,6 +65,7 @@ export class HandoffEngine implements ControlPlaneHandler {
   #queue: Promise<void> = Promise.resolve();
   #closed = false;
   #fatalError: Error | null = null;
+  #explicitModelCatalog: readonly CodexModel[] | null = null;
 
   public constructor(options: HandoffEngineOptions) {
     z.uuid().parse(options.sessionId);
@@ -113,12 +118,92 @@ export class HandoffEngine implements ControlPlaneHandler {
     }, context.signal);
   }
 
+  public applyExplicitProfile(request: ExplicitProfileRequest): Promise<ExplicitProfileResult> {
+    return this.#enqueue(() => {
+      const parsed = explicitProfileRequestSchema.safeParse(request);
+      return parsed.success
+        ? this.#applyExplicitProfile(parsed.data)
+        : explicitRejected("invalid_explicit_command", "The explicit profile command is invalid");
+    });
+  }
+
   public close(): void {
     if (this.#closed) {
       return;
     }
     this.#closed = true;
     this.#unsubscribeNotification();
+  }
+
+  async #applyExplicitProfile(request: ExplicitProfileRequest): Promise<ExplicitProfileResult> {
+    if (this.#fatalError !== null || this.#state.routerState === "failed") {
+      return explicitRejected("router_failed", "The profile router is in a failed state");
+    }
+    if (!this.#bridge.isInitialized) {
+      return explicitRejected("app_server_not_initialized", "Codex App Server is not initialized");
+    }
+    if (this.#pending !== null || this.#state.routerState !== "idle") {
+      return explicitRejected("handoff_in_progress", "Another profile handoff is already in progress");
+    }
+    if (this.#state.activeTurnId !== null) {
+      return explicitRejected("turn_in_progress", "An explicit profile command requires an idle thread");
+    }
+    if (this.#state.activeThreadId !== null && this.#state.activeThreadId !== request.threadId) {
+      return explicitRejected("thread_mismatch", "The explicit profile command targets a different thread");
+    }
+
+    const models = this.#explicitModelCatalog ?? await this.#loadExplicitModelCatalog();
+    const matches = resolveExplicitModels(models, request.modelQuery);
+    if (matches.length === 0) {
+      return explicitRejected("unsupported_model", "The requested model is not available");
+    }
+    if (matches.length !== 1) {
+      return explicitRejected("ambiguous_model", "The requested model is ambiguous");
+    }
+    const model = matches[0];
+    if (model === undefined) {
+      throw new HandoffEngineError("Explicit model catalog match disappeared");
+    }
+    const effort = request.effort.toLowerCase();
+    if (!model.supportedReasoningEfforts.some((option) => option.reasoningEffort === effort)) {
+      return explicitRejected("unsupported_effort", "The requested effort is not supported by the selected model");
+    }
+    if (!isSafeProfileToken(model.model) || !isSafeProfileToken(effort)) {
+      return explicitRejected("invalid_catalog_profile", "The selected catalog profile is not safe to apply");
+    }
+
+    const target = { model: model.model, effort };
+    this.#state.activeThreadId ??= request.threadId;
+    await this.#governance.resetChain(this.#state);
+    this.#state.chainId = null;
+    this.#state.autonomousSwitches = 0;
+    if (this.#state.currentProfile?.model === target.model && this.#state.currentProfile.effort === target.effort) {
+      return { status: "noop", profile: target };
+    }
+
+    const switchId = randomUUID();
+    this.#state.routerState = "applying_settings";
+    await this.#governance.recordExplicitSwitch(switchId, target, this.#state);
+    await this.#bridge.updateThreadSettings({
+      threadId: request.threadId,
+      model: target.model,
+      effort: target.effort,
+    });
+    this.#assertOpen();
+    this.#state.currentProfile = { ...target };
+    await this.#governance.recordSettingsApplied(switchId, target, this.#state);
+    this.#state.routerState = "idle";
+    return { status: "applied", profile: target };
+  }
+
+  async #loadExplicitModelCatalog(): Promise<readonly CodexModel[]> {
+    const models = await this.#bridge.listModels();
+    this.#assertOpen();
+    this.#explicitModelCatalog = models.map((model) => ({
+      ...model,
+      supportedReasoningEfforts: model.supportedReasoningEfforts.map((option) => ({ ...option })),
+    }));
+    return this.#explicitModelCatalog;
   }
 
   async #scheduleSwitch(
@@ -381,6 +466,39 @@ function cloneState(state: SessionState): SessionState {
 
 function rejected(code: string, message: string): SwitchResult {
   return { status: "rejected", code, message };
+}
+
+function explicitRejected(code: string, message: string): ExplicitProfileResult {
+  return { status: "rejected", code, message };
+}
+
+function resolveExplicitModels(models: readonly CodexModel[], query: string): CodexModel[] {
+  const normalizedQuery = normalizeModelName(query);
+  if (normalizedQuery === "") {
+    return [];
+  }
+  return models.filter((model) => {
+    if (model.hidden) {
+      return false;
+    }
+    const aliases = [model.id, model.model, model.displayName].flatMap((value) => {
+      const normalized = normalizeModelName(value);
+      return normalized.startsWith("gpt ") ? [normalized, normalized.slice(4)] : [normalized];
+    });
+    return aliases.includes(normalizedQuery);
+  });
+}
+
+function normalizeModelName(value: string): string {
+  return value
+    .normalize("NFKC")
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .trim();
+}
+
+function isSafeProfileToken(value: string): boolean {
+  return /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u.test(value);
 }
 
 function asError(error: unknown): Error {

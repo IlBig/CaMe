@@ -11,10 +11,13 @@ import {
   ControlMcpConfigurationError,
   ControlPlaneClient,
   ControlPlaneServer,
+  AUTONOMOUS_SWITCH_CONTINUATION,
+  AUTONOMOUS_SWITCH_REASON,
   createControlMcpServer,
   runControlMcpServer,
   type ControlPlaneHandler,
   type SessionState,
+  type SwitchRequest,
 } from "../../src/index.js";
 
 const AUTH_TOKEN = "a".repeat(43);
@@ -37,8 +40,12 @@ describe("CaMe MCP control server", () => {
     await chmod(directory, 0o700);
     const socketPath = join(directory, "control.sock");
     const sessionId = randomUUID();
+    let switchRequest: SwitchRequest | null = null;
     const handler: ControlPlaneHandler = {
-      switchModel: async () => ({ status: "scheduled", switchId: randomUUID() }),
+      switchModel: async (request) => {
+        switchRequest = request;
+        return { status: "scheduled", switchId: randomUUID() };
+      },
       confirmSwitch: async () => ({ status: "noop" }),
       getState: async () => createState(sessionId),
     };
@@ -57,18 +64,32 @@ describe("CaMe MCP control server", () => {
         "came_session_state",
         "came_switch_model",
       ]);
+      const switchTool = tools.tools.find((tool) => tool.name === "came_switch_model");
+      expect(switchTool?.inputSchema).toMatchObject({
+        additionalProperties: false,
+        required: ["model", "effort"],
+        properties: {
+          model: expect.any(Object),
+          effort: expect.any(Object),
+        },
+      });
+      expect(Object.keys(switchTool?.inputSchema.properties ?? {})).toEqual(["model", "effort"]);
 
       const switchResult = await client.callTool({
         name: "came_switch_model",
         arguments: {
           model: "gpt-test-2",
           effort: "xhigh",
-          reason: "Need deeper reasoning",
-          continuation: "Continue with the current implementation",
         },
       });
       expect(switchResult.isError, JSON.stringify(switchResult)).not.toBe(true);
       expect(switchResult.structuredContent).toMatchObject({ status: "scheduled" });
+      expect(switchRequest).toEqual({
+        model: "gpt-test-2",
+        effort: "xhigh",
+        reason: AUTONOMOUS_SWITCH_REASON,
+        continuation: AUTONOMOUS_SWITCH_CONTINUATION,
+      });
 
       const confirmResult = await client.callTool({
         name: "came_confirm_switch",
@@ -101,6 +122,35 @@ describe("CaMe MCP control server", () => {
       const result = await client.callTool({
         name: "came_switch_model",
         arguments: { model: "gpt-test" },
+      });
+
+      expect(result.isError).toBe(true);
+    } finally {
+      await client.close();
+      await mcpServer.close();
+    }
+  });
+
+  it("rejects agent-controlled routing context before IPC execution", async () => {
+    const client = new Client({ name: "came-strict-input-test", version: "0.1.0" });
+    const controlClient = new ControlPlaneClient({
+      socketPath: "/tmp/does-not-exist.sock",
+      sessionId: randomUUID(),
+      authToken: AUTH_TOKEN,
+    });
+    const mcpServer = createControlMcpServer(controlClient);
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    try {
+      await mcpServer.connect(serverTransport);
+      await client.connect(clientTransport);
+      const result = await client.callTool({
+        name: "came_switch_model",
+        arguments: {
+          model: "gpt-test",
+          effort: "high",
+          reason: "agent supplied",
+          continuation: "agent supplied",
+        },
       });
 
       expect(result.isError).toBe(true);

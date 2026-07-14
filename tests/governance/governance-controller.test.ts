@@ -44,6 +44,30 @@ function context(): ControlPlaneRequestContext {
 }
 
 describe("GovernanceController", () => {
+  it("records explicit switches without agent-controlled text", async () => {
+    const sessionId = randomUUID();
+    const auditSink = new MemoryAuditSink();
+    const governance = new GovernanceController({ sessionId, auditSink });
+    const state = createState(sessionId, 0);
+
+    await governance.recordExplicitSwitch(
+      randomUUID(),
+      { model: "model-b", effort: "high" },
+      state,
+    );
+
+    expect(auditSink.events).toEqual([
+      expect.objectContaining({
+        event: "switch_requested",
+        decision: "explicit",
+        reasonLength: 0,
+        continuationLength: 0,
+      }),
+      expect.objectContaining({ event: "switch_scheduled", decision: "explicit" }),
+    ]);
+    expect(auditSink.events.some((event) => event.reasonFingerprint !== undefined)).toBe(false);
+  });
+
   it("allows switches below the threshold and emits privacy-preserving audit metadata", async () => {
     const sessionId = randomUUID();
     const auditSink = new MemoryAuditSink();

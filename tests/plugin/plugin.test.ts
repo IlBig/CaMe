@@ -73,9 +73,14 @@ describe("CaMe Codex plugin", () => {
     expect(skill).toContain("`came_session_state`");
     expect(skill).toContain("`came_switch_model`");
     expect(skill).toContain("`came_confirm_switch`");
+    expect(skill).toContain("only `model` and `effort`");
+    expect(skill).toContain("Do not call `came_session_state` as a preflight");
+    expect(skill).toContain("server generates all routing context deterministically");
     expect(skill).toContain("immediately following turn");
     expect(skill).toContain("Do not inject `/model`");
     expect(skill).toContain("Do not start or spawn another Codex session");
+    expect(skill).not.toContain("`reason`");
+    expect(skill).not.toContain("`continuation`");
     expect(skill).not.toContain("[TODO:");
     expect(metadata).toContain('default_prompt: "Use $route-with-came');
   });
