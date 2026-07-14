@@ -7,6 +7,8 @@ export * from "./control-plane/ipc-server.js";
 export * from "./control-plane/protocol.js";
 export * from "./contracts.js";
 export * from "./handoff/handoff-engine.js";
+export * from "./governance/audit-log.js";
+export * from "./governance/governance-controller.js";
 export * from "./mcp/control-server.js";
 export * from "./model-routing-matrix.js";
 export * from "./runtime/session-runtime.js";

@@ -5,8 +5,11 @@ import { describe, expect, it } from "vitest";
 
 import {
   AppServerBridge,
+  GovernanceController,
   HandoffEngine,
   HandoffEngineError,
+  type AuditEventInput,
+  type AuditSink,
   type CodexModel,
   type ControlPlaneRequestContext,
   type SessionState,
@@ -63,9 +66,18 @@ type Harness = {
   fromServer: PassThrough;
   peer: JsonLinePeer;
   sessionId: string;
+  auditEvents: AuditEventInput[];
 };
 
-function createHarness(): Harness {
+class MemoryAuditSink implements AuditSink {
+  public readonly events: AuditEventInput[] = [];
+
+  public async record(event: AuditEventInput): Promise<void> {
+    this.events.push(structuredClone(event));
+  }
+}
+
+function createHarness(auditSink: AuditSink = new MemoryAuditSink()): Harness {
   const fromServer = new PassThrough();
   const toServer = new PassThrough();
   const bridge = new AppServerBridge(fromServer, toServer);
@@ -73,7 +85,13 @@ function createHarness(): Harness {
   const sessionId = randomUUID();
   return {
     bridge,
-    engine: new HandoffEngine({ bridge, sessionId, onFatalError: (error) => fatalErrors.push(error) }),
+    engine: new HandoffEngine({
+      bridge,
+      sessionId,
+      governance: new GovernanceController({ sessionId, auditSink }),
+      onFatalError: (error) => fatalErrors.push(error),
+    }),
+    auditEvents: auditSink instanceof MemoryAuditSink ? auditSink.events : [],
     fatalErrors,
     fromServer,
     peer: new JsonLinePeer(toServer),
@@ -320,14 +338,52 @@ describe("HandoffEngine", () => {
       await respondWithModels(harness, [MODEL_B]);
       await expect(noop).resolves.toEqual({ status: "noop" });
 
-      const limited = harness.engine.switchModel({
+      const governed = harness.engine.switchModel({
         ...SWITCH_REQUEST,
         model: MODEL_A.model,
         effort: "medium",
       }, context());
       await respondWithModels(harness, [MODEL_A]);
-      await expect(limited).resolves.toMatchObject({ status: "rejected", code: "switch_limit_reached" });
+      const confirmation = await governed;
+      expect(confirmation).toMatchObject({ status: "confirmation_required" });
+      if (confirmation.status !== "confirmation_required") {
+        throw new Error("Expected a governed confirmation request");
+      }
 
+      const confirming = harness.engine.confirmSwitch({ requestId: confirmation.requestId }, context());
+      await respondWithModels(harness, [MODEL_A]);
+      await expect(confirming).resolves.toMatchObject({ status: "scheduled" });
+      await expect(harness.engine.getState(context())).resolves.toMatchObject({
+        autonomousSwitches: 5,
+        routerState: "waiting_turn_completion",
+      });
+      await expect(harness.engine.confirmSwitch({ requestId: confirmation.requestId }, context())).resolves.toMatchObject({
+        status: "rejected",
+        code: "invalid_confirmation",
+      });
+
+      JsonLinePeer.write(harness.fromServer, {
+        method: "turn/completed",
+        params: { threadId: "thread-1", turn: { id: sourceTurnId, status: "completed", items: [] } },
+      });
+      const updateRequest = await harness.peer.next();
+      expect(updateRequest).toMatchObject({ method: "thread/settings/update", params: { threadId: "thread-1" } });
+      JsonLinePeer.write(harness.fromServer, { id: updateRequest["id"], result: {} });
+      const startRequest = await harness.peer.next();
+      expect(startRequest).toMatchObject({ method: "turn/start", params: { threadId: "thread-1" } });
+      JsonLinePeer.write(harness.fromServer, {
+        method: "turn/started",
+        params: { threadId: "thread-1", turn: { id: "turn-confirmed", status: "inProgress", items: [] } },
+      });
+      JsonLinePeer.write(harness.fromServer, {
+        id: startRequest["id"],
+        result: { turn: { id: "turn-confirmed", status: "inProgress", items: [] } },
+      });
+      await expect(harness.engine.getState(context())).resolves.toMatchObject({
+        activeTurnId: "turn-confirmed",
+        autonomousSwitches: 5,
+      });
+      sourceTurnId = "turn-confirmed";
       JsonLinePeer.write(harness.fromServer, {
         method: "turn/completed",
         params: { threadId: "thread-1", turn: { id: sourceTurnId, status: "completed", items: [] } },
@@ -340,6 +396,10 @@ describe("HandoffEngine", () => {
         activeTurnId: "turn-user",
         chainId: null,
         autonomousSwitches: 0,
+      });
+      await expect(harness.engine.confirmSwitch({ requestId: confirmation.requestId }, context())).resolves.toMatchObject({
+        status: "rejected",
+        code: "invalid_confirmation",
       });
     } finally {
       await closeHarness(harness);
@@ -391,13 +451,39 @@ describe("HandoffEngine", () => {
     }
   });
 
-  it("rejects confirmation before governance is enabled", async () => {
+  it("fails closed when a required audit record cannot be persisted", async () => {
+    const auditSink: AuditSink = {
+      record: async (event) => {
+        if (event.event === "switch_scheduled") {
+          throw new Error("audit unavailable");
+        }
+      },
+    };
+    const harness = createHarness(auditSink);
+    try {
+      await initialize(harness);
+      await activateTurn(harness);
+      const switching = harness.engine.switchModel(SWITCH_REQUEST, context());
+      await respondWithModels(harness, [MODEL_B]);
+
+      await expect(switching).rejects.toThrow("audit unavailable");
+      await expect.poll(() => harness.fatalErrors.length).toBe(1);
+      await expect(harness.engine.getState(context())).resolves.toMatchObject({
+        routerState: "failed",
+        autonomousSwitches: 0,
+      });
+    } finally {
+      await closeHarness(harness);
+    }
+  });
+
+  it("rejects an unknown or already-consumed confirmation", async () => {
     const harness = createHarness();
     try {
       await expect(harness.engine.confirmSwitch({ requestId: randomUUID() }, context())).resolves.toEqual({
         status: "rejected",
-        code: "confirmation_not_pending",
-        message: "No model switch is awaiting confirmation",
+        code: "invalid_confirmation",
+        message: "Confirmation is unknown, expired, or already consumed",
       });
     } finally {
       await closeHarness(harness);

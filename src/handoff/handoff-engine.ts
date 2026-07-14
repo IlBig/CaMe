@@ -20,21 +20,25 @@ import type {
   ControlPlaneHandler,
   ControlPlaneRequestContext,
 } from "../control-plane/protocol.js";
+import {
+  MAX_AUTONOMOUS_SWITCHES,
+  type GovernanceController,
+} from "../governance/governance-controller.js";
 
-export const MAX_HANDOFF_CHAIN_SWITCHES = 5;
+export const MAX_HANDOFF_CHAIN_SWITCHES = MAX_AUTONOMOUS_SWITCHES;
 
 type PendingSwitch = Readonly<{
   switchId: string;
   threadId: string;
   sourceTurnId: string;
   target: ModelProfile;
-  reason: string;
   continuation: string;
 }>;
 
 export type HandoffEngineOptions = {
   sessionId: string;
   bridge: AppServerBridge;
+  governance: GovernanceController;
   onFatalError: (error: Error) => void;
 };
 
@@ -48,6 +52,7 @@ export class HandoffEngineError extends Error {
 export class HandoffEngine implements ControlPlaneHandler {
   readonly #bridge: AppServerBridge;
   readonly #onFatalError: (error: Error) => void;
+  readonly #governance: GovernanceController;
   readonly #unsubscribeNotification: () => void;
   #state: SessionState;
   #pending: PendingSwitch | null = null;
@@ -59,6 +64,7 @@ export class HandoffEngine implements ControlPlaneHandler {
   public constructor(options: HandoffEngineOptions) {
     z.uuid().parse(options.sessionId);
     this.#bridge = options.bridge;
+    this.#governance = options.governance;
     this.#onFatalError = options.onFatalError;
     this.#state = {
       sessionId: options.sessionId,
@@ -70,32 +76,32 @@ export class HandoffEngine implements ControlPlaneHandler {
       routerState: "idle",
     };
     this.#unsubscribeNotification = this.#bridge.onNotification((notification) => {
-      void this.#enqueue(() => this.#handleNotification(notification)).catch((error: unknown) => {
-        this.#enterFailed(asError(error));
+      void this.#enqueue(() => this.#handleNotification(notification)).catch(async (error: unknown) => {
+        await this.#enterFailed(asError(error));
       });
     });
   }
 
   public switchModel(request: SwitchRequest, context: ControlPlaneRequestContext): Promise<SwitchResult> {
-    return this.#enqueue(() => this.#scheduleSwitch(request, context), false);
+    return this.#enqueue(() => this.#scheduleSwitch(request, context, null), context.signal);
   }
 
-  public confirmSwitch(_request: ConfirmSwitchRequest, context: ControlPlaneRequestContext): Promise<SwitchResult> {
-    return this.#enqueue(() => {
+  public confirmSwitch(request: ConfirmSwitchRequest, context: ControlPlaneRequestContext): Promise<SwitchResult> {
+    return this.#enqueue(async () => {
       context.signal.throwIfAborted();
-      return {
-        status: "rejected",
-        code: "confirmation_not_pending",
-        message: "No model switch is awaiting confirmation",
-      };
-    }, false);
+      const confirmation = await this.#governance.confirm(request.requestId, this.#state, context);
+      if (confirmation.status === "result") {
+        return confirmation.result;
+      }
+      return this.#scheduleSwitch(confirmation.request, context, confirmation.target);
+    }, context.signal);
   }
 
   public getState(context: ControlPlaneRequestContext): Promise<SessionState> {
     return this.#enqueue(() => {
       context.signal.throwIfAborted();
       return sessionStateSchema.parse(cloneState(this.#state));
-    }, false);
+    }, context.signal);
   }
 
   public close(): void {
@@ -106,7 +112,11 @@ export class HandoffEngine implements ControlPlaneHandler {
     this.#unsubscribeNotification();
   }
 
-  async #scheduleSwitch(request: SwitchRequest, context: ControlPlaneRequestContext): Promise<SwitchResult> {
+  async #scheduleSwitch(
+    request: SwitchRequest,
+    context: ControlPlaneRequestContext,
+    confirmedTarget: ModelProfile | null,
+  ): Promise<SwitchResult> {
     context.signal.throwIfAborted();
     if (this.#fatalError !== null || this.#state.routerState === "failed") {
       return rejected("router_failed", "The handoff engine is in a failed state");
@@ -140,25 +150,45 @@ export class HandoffEngine implements ControlPlaneHandler {
       return rejected("unsupported_effort", `Effort '${request.effort}' is not supported by model '${model.model}'`);
     }
     const target = { model: model.model, effort: request.effort };
+    if (confirmedTarget !== null
+      && (confirmedTarget.model !== target.model || confirmedTarget.effort !== target.effort)) {
+      return rejected("confirmation_target_changed", "The confirmed model profile is no longer canonical");
+    }
     if (this.#state.currentProfile?.model === target.model && this.#state.currentProfile.effort === target.effort) {
       return { status: "noop" };
     }
-    if (this.#state.autonomousSwitches >= MAX_HANDOFF_CHAIN_SWITCHES) {
-      return rejected("switch_limit_reached", "The autonomous handoff chain reached its limit");
+    const confirmed = confirmedTarget !== null;
+    if (!confirmed) {
+      const authorization = await this.#governance.authorize(request, target, this.#state, context);
+      if (authorization.status === "result") {
+        return authorization.result;
+      }
     }
 
     const switchId = randomUUID();
+    const previousChainId = this.#state.chainId;
+    const previousAutonomousSwitches = this.#state.autonomousSwitches;
     this.#pending = {
       switchId,
       threadId,
       sourceTurnId: turnId,
       target,
-      reason: request.reason,
       continuation: request.continuation,
     };
     this.#state.chainId ??= randomUUID();
-    this.#state.autonomousSwitches += 1;
+    if (!confirmed) {
+      this.#state.autonomousSwitches += 1;
+    }
     this.#state.routerState = "waiting_turn_completion";
+    try {
+      await this.#governance.recordScheduled(switchId, target, this.#state, confirmed);
+    } catch (error) {
+      this.#pending = null;
+      this.#state.chainId = previousChainId;
+      this.#state.autonomousSwitches = previousAutonomousSwitches;
+      this.#state.routerState = "idle";
+      throw error;
+    }
     return { status: "scheduled", switchId };
   }
 
@@ -168,7 +198,7 @@ export class HandoffEngine implements ControlPlaneHandler {
     }
     switch (notification.method) {
       case "turn/started":
-        this.#handleTurnStarted(turnLifecycleNotificationSchema.parse(notification.params));
+        await this.#handleTurnStarted(turnLifecycleNotificationSchema.parse(notification.params));
         return;
       case "turn/completed":
         await this.#handleTurnCompleted(turnLifecycleNotificationSchema.parse(notification.params));
@@ -179,7 +209,7 @@ export class HandoffEngine implements ControlPlaneHandler {
     }
   }
 
-  #handleTurnStarted(params: z.infer<typeof turnLifecycleNotificationSchema>): void {
+  async #handleTurnStarted(params: z.infer<typeof turnLifecycleNotificationSchema>): Promise<void> {
     if (params.turn.status !== "inProgress") {
       throw new HandoffEngineError("turn/started did not contain an in-progress turn");
     }
@@ -192,6 +222,7 @@ export class HandoffEngine implements ControlPlaneHandler {
 
     const isExpectedContinuation = this.#expectedContinuationTurnId === params.turn.id;
     if (!isExpectedContinuation && this.#state.activeTurnId === null) {
+      await this.#governance.resetChain(this.#state);
       if (this.#state.activeThreadId !== params.threadId) {
         this.#state.currentProfile = null;
       }
@@ -238,6 +269,7 @@ export class HandoffEngine implements ControlPlaneHandler {
     });
     this.#assertOpen();
     this.#state.currentProfile = { ...pending.target };
+    await this.#governance.recordSettingsApplied(pending.switchId, pending.target, this.#state);
     this.#state.routerState = "starting_continuation";
     const turn = await this.#bridge.startTurn({
       threadId: pending.threadId,
@@ -254,6 +286,7 @@ export class HandoffEngine implements ControlPlaneHandler {
     this.#state.activeTurnId = turn.id;
     this.#state.routerState = "idle";
     this.#pending = null;
+    await this.#governance.recordContinuationStarted(pending.switchId, pending.target, this.#state);
   }
 
   #handleSettingsUpdated(params: z.infer<typeof threadSettingsUpdatedNotificationSchema>): void {
@@ -269,16 +302,16 @@ export class HandoffEngine implements ControlPlaneHandler {
         };
   }
 
-  #enqueue<T>(operation: () => T | Promise<T>, fatalOnError = true): Promise<T> {
+  #enqueue<T>(operation: () => T | Promise<T>, nonFatalSignal?: AbortSignal): Promise<T> {
     const execution = this.#queue.then(() => {
       this.#assertOpen();
       return operation();
     });
     this.#queue = execution.then(
       () => undefined,
-      (error: unknown) => {
-        if (fatalOnError) {
-          this.#enterFailed(asError(error));
+      async (error: unknown) => {
+        if (!isSignalAbort(error, nonFatalSignal)) {
+          await this.#enterFailed(asError(error));
         }
       },
     );
@@ -291,13 +324,19 @@ export class HandoffEngine implements ControlPlaneHandler {
     }
   }
 
-  #enterFailed(error: Error): void {
+  async #enterFailed(error: Error): Promise<void> {
     if (this.#fatalError !== null || this.#closed) {
       return;
     }
     this.#fatalError = error;
     this.#state.routerState = "failed";
-    this.#onFatalError(error);
+    let fatalError = error;
+    try {
+      await this.#governance.recordFailure(error, this.#state);
+    } catch (auditError) {
+      fatalError = new AggregateError([error, auditError], "Handoff and audit failed");
+    }
+    this.#onFatalError(fatalError);
   }
 }
 
@@ -314,4 +353,9 @@ function rejected(code: string, message: string): SwitchResult {
 
 function asError(error: unknown): Error {
   return error instanceof Error ? error : new HandoffEngineError(String(error));
+}
+
+function isSignalAbort(error: unknown, signal: AbortSignal | undefined): boolean {
+  return signal?.aborted === true
+    && (error === signal.reason || (error instanceof Error && error.name === "AbortError"));
 }

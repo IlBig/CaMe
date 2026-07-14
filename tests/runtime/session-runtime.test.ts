@@ -82,6 +82,7 @@ function createRuntimeHarness(options: {
     tuiEnvironments.push(env);
     expect(statSync(runtimeDir).mode & 0o777).toBe(0o700);
     expect(statSync(controlSocket).mode & 0o777).toBe(0o600);
+    expect(statSync(`${runtimeDir}/audit.jsonl`).mode & 0o777).toBe(0o600);
     expect(controlToken).not.toBe(token);
 
     const script = options.connect === false

@@ -17,6 +17,8 @@ import {
   CAME_CONTROL_TOKEN_ENV,
 } from "../control-plane/protocol.js";
 import { HandoffEngine } from "../handoff/handoff-engine.js";
+import { JsonlAuditLog } from "../governance/audit-log.js";
+import { GovernanceController } from "../governance/governance-controller.js";
 import {
   SessionGatewayDisconnectedError,
   WebSocketGateway,
@@ -63,6 +65,7 @@ export class SessionRuntime {
   #gateway: WebSocketGateway | null = null;
   #controlServer: ControlPlaneServer | null = null;
   #handoffEngine: HandoffEngine | null = null;
+  #auditLog: JsonlAuditLog | null = null;
   #tui: ChildProcess | null = null;
   #completion: Deferred<number> | null = null;
   #stopped: Deferred<void> | null = null;
@@ -100,6 +103,10 @@ export class SessionRuntime {
       if (this.#stopRequested) {
         return await this.#completion.promise;
       }
+      this.#auditLog = await JsonlAuditLog.create(join(this.#runtimeDir, "audit.jsonl"), sessionId);
+      if (this.#stopRequested) {
+        return await this.#completion.promise;
+      }
       const controlSocketPath = join(this.#runtimeDir, "control.sock");
       const appServerEnv: NodeJS.ProcessEnv = {
         ...process.env,
@@ -132,6 +139,7 @@ export class SessionRuntime {
       this.#handoffEngine = new HandoffEngine({
         sessionId,
         bridge: this.#appServer.bridge,
+        governance: new GovernanceController({ sessionId, auditSink: this.#auditLog }),
         onFatalError: (error) => this.#fail(new SessionRuntimeError("Model handoff failed", { cause: error })),
       });
       this.#controlServer = new ControlPlaneServer({
@@ -298,6 +306,12 @@ export class SessionRuntime {
     this.#controlServer = null;
     this.#handoffEngine?.close();
     this.#handoffEngine = null;
+    try {
+      await this.#auditLog?.close();
+    } catch (error) {
+      errors.push(asError(error));
+    }
+    this.#auditLog = null;
 
     try {
       this.#appServer?.bridge.close(new AppServerConnectionClosedError("CaMe session stopped"));
