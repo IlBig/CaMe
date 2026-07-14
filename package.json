@@ -20,6 +20,7 @@
     "test:handoff": "vitest run tests/handoff",
     "test:plugin": "vitest run tests/plugin",
     "test:control-plane": "vitest run tests/control-plane",
+    "test:diagnostics": "vitest run tests/diagnostics tests/runtime/came-cli.test.ts",
     "test:runtime": "vitest run tests/runtime"
   },
   "dependencies": {

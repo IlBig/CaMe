@@ -2,11 +2,32 @@
 
 import { pathToFileURL } from "node:url";
 
+import {
+  formatDiagnosticReport,
+  runDiagnostics,
+  type DiagnosticReport,
+} from "../diagnostics/doctor.js";
 import { SessionRuntime } from "../runtime/session-runtime.js";
 
-export async function main(args: string[]): Promise<number> {
+export type CameCliDependencies = Readonly<{
+  runDiagnostics?: () => Promise<DiagnosticReport>;
+}>;
+
+export async function main(args: string[], dependencies: CameCliDependencies = {}): Promise<number> {
+  if (args[0] === "doctor") {
+    const doctorArgs = args.slice(1);
+    if (doctorArgs.length > 1 || (doctorArgs.length === 1 && doctorArgs[0] !== "--json")) {
+      process.stderr.write("Usage: came [doctor [--json]]\n");
+      return 2;
+    }
+    const report = await (dependencies.runDiagnostics ?? runDiagnostics)();
+    process.stdout.write(doctorArgs[0] === "--json"
+      ? `${JSON.stringify(report, null, 2)}\n`
+      : formatDiagnosticReport(report));
+    return report.ready ? 0 : 1;
+  }
   if (args.length > 0) {
-    process.stderr.write("Usage: came\n");
+    process.stderr.write("Usage: came [doctor [--json]]\n");
     return 2;
   }
 
