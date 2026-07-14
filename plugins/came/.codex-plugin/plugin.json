@@ -1,0 +1,25 @@
+{
+  "name": "came",
+  "version": "0.1.0",
+  "description": "Autonomous same-thread model and reasoning-effort routing for Codex sessions.",
+  "author": {
+    "name": "CaMe"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "CaMe",
+    "shortDescription": "Route Codex model and reasoning effort",
+    "longDescription": "Lets Codex schedule governed model and reasoning-effort handoffs while preserving the active thread.",
+    "developerName": "CaMe",
+    "category": "Productivity",
+    "capabilities": [
+      "Adaptive routing",
+      "Same-thread handoff",
+      "Governed confirmation"
+    ],
+    "defaultPrompt": [
+      "Use $route-with-came to route this project autonomously."
+    ]
+  },
+  "mcpServers": "./.mcp.json"
+}

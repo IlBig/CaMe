@@ -1,0 +1,4 @@
+interface:
+  display_name: "Route with CaMe"
+  short_description: "Route Codex model and reasoning effort"
+  default_prompt: "Use $route-with-came to choose and schedule the best model and reasoning effort for this task."

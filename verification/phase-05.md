@@ -4,8 +4,8 @@
 
 - At most five autonomous switches per handoff chain.
 - A bounded, monotonic-TTL confirmation after the autonomous threshold.
-- One-time confirmation consumption bound to session, turn and canonical target profile.
-- Confirmation invalidation on expiry, stale context and new user turns.
+- One-time confirmation consumption bound to session, thread, exact pending request and canonical target profile.
+- Confirmation invalidation on expiry, stale context or completion of the immediate response turn without consumption.
 - Synchronous durable JSONL audit records without prompts, continuations or authentication secrets.
 
 ## Production adversarial review
@@ -34,6 +34,13 @@
 ### Cycle 5
 
 - No actionable findings.
+
+### Post-phase integration correction
+
+- The Codex plugin workflow exposed that user approval necessarily arrives in the next turn.
+- Preserved a pending confirmation for exactly that immediate same-thread response turn.
+- Invalidated it when the response turn completed without consumption and retained monotonic TTL and one-time semantics.
+- Revalidated Governance, Handoff, Control Plane, Runtime, type-check and build after the correction.
 
 ## Test evidence
 

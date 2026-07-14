@@ -18,6 +18,7 @@
     "test:foundation": "vitest run tests/foundation",
     "test:governance": "vitest run tests/governance",
     "test:handoff": "vitest run tests/handoff",
+    "test:plugin": "vitest run tests/plugin",
     "test:control-plane": "vitest run tests/control-plane",
     "test:runtime": "vitest run tests/runtime"
   },
