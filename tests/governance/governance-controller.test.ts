@@ -93,12 +93,18 @@ describe("GovernanceController", () => {
       result: { status: "rejected", code: "confirmation_pending" },
     });
 
-    await expect(governance.confirm(confirmationId, state, context())).resolves.toMatchObject({
+    const confirmationState: SessionState = {
+      ...state,
+      activeTurnId: "turn-2",
+      routerState: "awaiting_confirmation",
+    };
+    await expect(governance.confirm(confirmationId, confirmationState, context())).resolves.toMatchObject({
       status: "confirmed",
       request: REQUEST,
       target: { model: "model-b", effort: "high" },
     });
-    await expect(governance.confirm(confirmationId, state, context())).resolves.toMatchObject({
+    expect(governance.hasPendingConfirmation).toBe(false);
+    await expect(governance.confirm(confirmationId, confirmationState, context())).resolves.toMatchObject({
       status: "result",
       result: { status: "rejected", code: "invalid_confirmation" },
     });
@@ -129,7 +135,10 @@ describe("GovernanceController", () => {
     }
     now = 121;
 
-    await expect(governance.confirm(authorization.result.requestId, state, context())).resolves.toMatchObject({
+    await expect(governance.confirm(authorization.result.requestId, {
+      ...state,
+      routerState: "awaiting_confirmation",
+    }, context())).resolves.toMatchObject({
       status: "result",
       result: { status: "rejected", code: "invalid_confirmation" },
     });
@@ -145,7 +154,12 @@ describe("GovernanceController", () => {
     if (first.status !== "result" || first.result.status !== "confirmation_required") {
       throw new Error("Expected confirmation request");
     }
-    const staleState = { ...state, activeTurnId: "turn-2" };
+    const staleState: SessionState = {
+      ...state,
+      activeThreadId: "thread-2",
+      activeTurnId: "turn-2",
+      routerState: "awaiting_confirmation",
+    };
     await expect(governance.confirm(first.result.requestId, staleState, context())).resolves.toMatchObject({
       status: "result",
       result: { status: "rejected", code: "stale_confirmation" },

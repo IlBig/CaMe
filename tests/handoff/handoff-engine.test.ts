@@ -350,6 +350,26 @@ describe("HandoffEngine", () => {
         throw new Error("Expected a governed confirmation request");
       }
 
+      await expect(harness.engine.getState(context())).resolves.toMatchObject({
+        activeTurnId: sourceTurnId,
+        autonomousSwitches: 5,
+        routerState: "awaiting_confirmation",
+      });
+      JsonLinePeer.write(harness.fromServer, {
+        method: "turn/completed",
+        params: { threadId: "thread-1", turn: { id: sourceTurnId, status: "completed", items: [] } },
+      });
+      await expect(harness.engine.getState(context())).resolves.toMatchObject({
+        activeTurnId: null,
+        autonomousSwitches: 5,
+        routerState: "awaiting_confirmation",
+      });
+      sourceTurnId = "turn-approval";
+      JsonLinePeer.write(harness.fromServer, {
+        method: "turn/started",
+        params: { threadId: "thread-1", turn: { id: sourceTurnId, status: "inProgress", items: [] } },
+      });
+
       const confirming = harness.engine.confirmSwitch({ requestId: confirmation.requestId }, context());
       await respondWithModels(harness, [MODEL_A]);
       await expect(confirming).resolves.toMatchObject({ status: "scheduled" });
@@ -401,6 +421,63 @@ describe("HandoffEngine", () => {
         status: "rejected",
         code: "invalid_confirmation",
       });
+    } finally {
+      await closeHarness(harness);
+    }
+  });
+
+  it("invalidates an unconfirmed switch after the immediate response turn", async () => {
+    const harness = createHarness();
+    try {
+      await initialize(harness);
+      await activateTurn(harness);
+      let sourceTurnId = "turn-1";
+      for (let index = 1; index <= 5; index += 1) {
+        const target = index % 2 === 1 ? MODEL_B : MODEL_A;
+        const effort = target === MODEL_B ? "xhigh" : "medium";
+        const nextTurnId = `turn-${index + 1}`;
+        await completeHandoff(harness, sourceTurnId, nextTurnId, target, effort);
+        sourceTurnId = nextTurnId;
+      }
+
+      const governed = harness.engine.switchModel({
+        ...SWITCH_REQUEST,
+        model: MODEL_A.model,
+        effort: "medium",
+      }, context());
+      await respondWithModels(harness, [MODEL_A]);
+      const confirmation = await governed;
+      if (confirmation.status !== "confirmation_required") {
+        throw new Error("Expected a governed confirmation request");
+      }
+      JsonLinePeer.write(harness.fromServer, {
+        method: "turn/completed",
+        params: { threadId: "thread-1", turn: { id: sourceTurnId, status: "completed", items: [] } },
+      });
+      JsonLinePeer.write(harness.fromServer, {
+        method: "turn/started",
+        params: { threadId: "thread-1", turn: { id: "turn-response", status: "inProgress", items: [] } },
+      });
+      JsonLinePeer.write(harness.fromServer, {
+        method: "turn/completed",
+        params: { threadId: "thread-1", turn: { id: "turn-response", status: "completed", items: [] } },
+      });
+
+      await expect(harness.engine.getState(context())).resolves.toMatchObject({
+        activeTurnId: null,
+        chainId: null,
+        autonomousSwitches: 0,
+        routerState: "idle",
+      });
+      await expect(harness.engine.confirmSwitch({ requestId: confirmation.requestId }, context())).resolves.toMatchObject({
+        status: "rejected",
+        code: "invalid_confirmation",
+      });
+      expect(harness.auditEvents).toContainEqual(expect.objectContaining({
+        event: "chain_reset",
+        decision: "new_turn_confirmation_invalidated",
+      }));
+      expect(harness.fatalErrors).toEqual([]);
     } finally {
       await closeHarness(harness);
     }

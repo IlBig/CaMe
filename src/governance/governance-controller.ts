@@ -48,6 +48,10 @@ export class GovernanceController {
   readonly #fingerprintKey: Buffer;
   #pendingConfirmation: PendingConfirmation | null = null;
 
+  public get hasPendingConfirmation(): boolean {
+    return this.#pendingConfirmation !== null;
+  }
+
   public constructor(options: GovernanceControllerOptions) {
     z.uuid().parse(options.sessionId);
     if (options.confirmationTtlMs !== undefined && (!Number.isSafeInteger(options.confirmationTtlMs) || options.confirmationTtlMs <= 0)) {
@@ -170,7 +174,9 @@ export class GovernanceController {
         result: rejected("invalid_confirmation", "Confirmation is unknown, expired, or already consumed"),
       };
     }
-    if (state.activeThreadId !== pending.threadId || state.activeTurnId !== pending.turnId || state.routerState !== "idle") {
+    if (state.activeThreadId !== pending.threadId
+      || state.activeTurnId === null
+      || state.routerState !== "awaiting_confirmation") {
       this.#pendingConfirmation = null;
       await this.#auditSink.record({
         event: "confirmation_rejected",

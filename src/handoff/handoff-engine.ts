@@ -56,6 +56,7 @@ export class HandoffEngine implements ControlPlaneHandler {
   readonly #unsubscribeNotification: () => void;
   #state: SessionState;
   #pending: PendingSwitch | null = null;
+  #confirmationSourceTurnId: string | null = null;
   #expectedContinuationTurnId: string | null = null;
   #queue: Promise<void> = Promise.resolve();
   #closed = false;
@@ -91,8 +92,16 @@ export class HandoffEngine implements ControlPlaneHandler {
       context.signal.throwIfAborted();
       const confirmation = await this.#governance.confirm(request.requestId, this.#state, context);
       if (confirmation.status === "result") {
+        if (this.#state.routerState === "awaiting_confirmation" && !this.#governance.hasPendingConfirmation) {
+          await this.#clearAwaitingConfirmation();
+        }
         return confirmation.result;
       }
+      if (this.#state.routerState !== "awaiting_confirmation" || this.#confirmationSourceTurnId === null) {
+        throw new HandoffEngineError("Governance confirmed a switch without a pending handoff confirmation");
+      }
+      this.#confirmationSourceTurnId = null;
+      this.#state.routerState = "idle";
       return this.#scheduleSwitch(confirmation.request, context, confirmation.target);
     }, context.signal);
   }
@@ -161,6 +170,10 @@ export class HandoffEngine implements ControlPlaneHandler {
     if (!confirmed) {
       const authorization = await this.#governance.authorize(request, target, this.#state, context);
       if (authorization.status === "result") {
+        if (authorization.result.status === "confirmation_required") {
+          this.#confirmationSourceTurnId = turnId;
+          this.#state.routerState = "awaiting_confirmation";
+        }
         return authorization.result;
       }
     }
@@ -221,7 +234,11 @@ export class HandoffEngine implements ControlPlaneHandler {
     }
 
     const isExpectedContinuation = this.#expectedContinuationTurnId === params.turn.id;
-    if (!isExpectedContinuation && this.#state.activeTurnId === null) {
+    const isConfirmationResponse = this.#state.routerState === "awaiting_confirmation"
+      && this.#confirmationSourceTurnId !== null
+      && this.#state.activeThreadId === params.threadId
+      && this.#state.activeTurnId === null;
+    if (!isExpectedContinuation && !isConfirmationResponse && this.#state.activeTurnId === null) {
       await this.#governance.resetChain(this.#state);
       if (this.#state.activeThreadId !== params.threadId) {
         this.#state.currentProfile = null;
@@ -251,6 +268,13 @@ export class HandoffEngine implements ControlPlaneHandler {
 
     const pending = this.#pending;
     if (pending === null) {
+      if (this.#state.routerState === "awaiting_confirmation") {
+        if (this.#confirmationSourceTurnId === params.turn.id && params.turn.status === "completed") {
+          return;
+        }
+        await this.#clearAwaitingConfirmation();
+        return;
+      }
       this.#state.routerState = "idle";
       return;
     }
@@ -300,6 +324,14 @@ export class HandoffEngine implements ControlPlaneHandler {
           model: params.threadSettings.model,
           effort: params.threadSettings.effort,
         };
+  }
+
+  async #clearAwaitingConfirmation(): Promise<void> {
+    await this.#governance.resetChain(this.#state);
+    this.#confirmationSourceTurnId = null;
+    this.#state.chainId = null;
+    this.#state.autonomousSwitches = 0;
+    this.#state.routerState = "idle";
   }
 
   #enqueue<T>(operation: () => T | Promise<T>, nonFatalSignal?: AbortSignal): Promise<T> {
