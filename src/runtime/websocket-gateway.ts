@@ -13,7 +13,6 @@ import {
 import type {
   ExplicitProfileRequest,
   ExplicitProfileResult,
-  ModelProfile,
 } from "../contracts.js";
 
 export const DEFAULT_GATEWAY_MAX_PAYLOAD_BYTES = 16 * 1024 * 1024;
@@ -234,38 +233,62 @@ export class WebSocketGateway {
       return false;
     }
     if (inspection.status === "invalid") {
-      this.#sendRequestError(message.id, -32602, inspection.message);
+      if (inspection.threadId === null) {
+        this.#sendRequestError(message.id, -32602, inspection.message);
+        return true;
+      }
+      this.#sendLocalTurnCompletion(
+        message.id,
+        inspection.threadId,
+        `Cambio profilo non applicato: ${inspection.message}`,
+        startedAtMs,
+      );
       return true;
     }
     if (this.#explicitProfileHandler === undefined) {
-      this.#sendRequestError(message.id, -32040, "CaMe explicit profile routing is unavailable");
+      this.#sendLocalTurnCompletion(
+        message.id,
+        inspection.request.threadId,
+        "Cambio profilo non applicato: il router dei profili non è disponibile.",
+        startedAtMs,
+      );
       return true;
     }
 
     const result = await this.#explicitProfileHandler(inspection.request);
     if (result.status === "rejected") {
-      this.#sendRequestError(message.id, -32040, result.message, { cameCode: result.code });
+      this.#sendLocalTurnCompletion(
+        message.id,
+        inspection.request.threadId,
+        `Cambio profilo non applicato: ${describeExplicitProfileRejection(result.code, result.message)}`,
+        startedAtMs,
+      );
       return true;
     }
     if (!isSafeProfileToken(result.profile.model)
       || !EXPLICIT_EFFORTS.has(result.profile.effort)
       || result.profile.effort !== inspection.request.effort) {
-      this.#sendRequestError(message.id, -32040, "CaMe returned an invalid explicit profile");
+      this.#sendLocalTurnCompletion(
+        message.id,
+        inspection.request.threadId,
+        "Cambio profilo non applicato: il router ha restituito un profilo non valido.",
+        startedAtMs,
+      );
       return true;
     }
-    this.#sendExplicitProfileCompletion(
+    this.#sendLocalTurnCompletion(
       message.id,
       inspection.request.threadId,
-      result.profile,
+      `Profilo attivo: ${result.profile.model}/${result.profile.effort}.`,
       startedAtMs,
     );
     return true;
   }
 
-  #sendExplicitProfileCompletion(
+  #sendLocalTurnCompletion(
     id: JsonRpcRequest["id"],
     threadId: string,
-    profile: ModelProfile,
+    text: string,
     startedAtMs: number,
   ): void {
     const completedAtMs = Date.now();
@@ -290,7 +313,7 @@ export class WebSocketGateway {
     const item = {
       type: "agentMessage",
       id: itemId,
-      text: `Profilo attivo: ${profile.model}/${profile.effort}.`,
+      text,
       phase: "final_answer",
       memoryCitation: null,
     };
@@ -379,36 +402,59 @@ class AppServerMessageError extends Error {
 
 type ExplicitCommandInspection =
   | Readonly<{ status: "not_command" }>
-  | Readonly<{ status: "invalid"; message: string }>
+  | Readonly<{ status: "invalid"; message: string; threadId: string | null }>
   | Readonly<{ status: "command"; request: ExplicitProfileRequest }>;
+
+type ExplicitCommandErrorCode =
+  | "command_too_long"
+  | "invalid_model"
+  | "missing_profile_or_effort"
+  | "multiline_command"
+  | "unsupported_effort";
 
 type ParsedExplicitCommand =
   | Readonly<{ status: "not_command" }>
   | Readonly<{ status: "invalid" }>
   | Readonly<{ status: "command"; modelQuery: string; effort: string }>;
 
+type DetailedParsedExplicitCommand =
+  | Readonly<{ status: "not_command" }>
+  | Readonly<{ status: "invalid"; code: ExplicitCommandErrorCode }>
+  | Readonly<{ status: "command"; modelQuery: string; effort: string }>;
+
 function inspectExplicitProfileCommand(message: JsonRpcRequest): ExplicitCommandInspection {
   if (!isRecord(message.params) || !Array.isArray(message.params["input"])) {
     return { status: "not_command" };
   }
+  const rawThreadId = message.params["threadId"];
+  const threadId = typeof rawThreadId === "string" && rawThreadId.trim() !== "" ? rawThreadId : null;
   const input = message.params["input"];
   const parsedCommands = input
     .filter((item): item is Record<string, unknown> => isRecord(item) && item["type"] === "text" && typeof item["text"] === "string")
-    .map((item) => parseExplicitProfileCommand(item["text"] as string))
+    .map((item) => parseExplicitProfileCommandDetailed(item["text"] as string))
     .filter((parsed) => parsed.status !== "not_command");
   if (parsedCommands.length === 0) {
     return { status: "not_command" };
   }
   if (input.length !== 1 || parsedCommands.length !== 1) {
-    return { status: "invalid", message: "An explicit profile command must be the only turn input" };
+    return {
+      status: "invalid",
+      message: "il comando deve essere l'unico contenuto del messaggio.",
+      threadId,
+    };
   }
   const parsed = parsedCommands[0];
   if (parsed === undefined || parsed.status === "invalid") {
-    return { status: "invalid", message: "Invalid explicit profile command" };
+    return {
+      status: "invalid",
+      message: parsed === undefined
+        ? "il comando non è valido."
+        : describeExplicitCommandError(parsed.code),
+      threadId,
+    };
   }
-  const threadId = message.params["threadId"];
-  if (typeof threadId !== "string" || threadId.trim() === "") {
-    return { status: "invalid", message: "An explicit profile command requires a thread id" };
+  if (threadId === null) {
+    return { status: "invalid", message: "il comando richiede un thread valido.", threadId: null };
   }
   return {
     status: "command",
@@ -421,14 +467,22 @@ function inspectExplicitProfileCommand(message: JsonRpcRequest): ExplicitCommand
 }
 
 export function parseExplicitProfileCommand(text: string): ParsedExplicitCommand {
+  const parsed = parseExplicitProfileCommandDetailed(text);
+  return parsed.status === "invalid" ? { status: "invalid" } : parsed;
+}
+
+function parseExplicitProfileCommandDetailed(text: string): DetailedParsedExplicitCommand {
   const trimmed = text.trim();
   const prefix = /^(?:cambia|imposta)\s+(?:il\s+)?modello\b/iu.exec(trimmed)
     ?? /^(?:change|switch|set)\s+(?:the\s+)?model\b/iu.exec(trimmed);
   if (prefix === null) {
     return { status: "not_command" };
   }
-  if (trimmed.length > MAX_EXPLICIT_PROFILE_COMMAND_LENGTH || EXPLICIT_PROFILE_LINE_SEPARATOR.test(trimmed)) {
-    return { status: "invalid" };
+  if (trimmed.length > MAX_EXPLICIT_PROFILE_COMMAND_LENGTH) {
+    return { status: "invalid", code: "command_too_long" };
+  }
+  if (EXPLICIT_PROFILE_LINE_SEPARATOR.test(trimmed)) {
+    return { status: "invalid", code: "multiline_command" };
   }
   const remainder = trimmed.slice(prefix[0].length)
     .replace(/^\s*(?:(?:in|a|su|to)\s+)?/iu, "")
@@ -436,17 +490,68 @@ export function parseExplicitProfileCommand(text: string): ParsedExplicitCommand
     .trim();
   const tokens = remainder.split(/\s+/u);
   if (tokens.length < 2) {
-    return { status: "invalid" };
+    return { status: "invalid", code: "missing_profile_or_effort" };
   }
   const effort = tokens.at(-1)?.toLowerCase();
   if (effort === undefined || !EXPLICIT_EFFORTS.has(effort)) {
-    return { status: "invalid" };
+    return { status: "invalid", code: "unsupported_effort" };
   }
   const modelQuery = tokens.slice(0, -1).join(" ");
   if (modelQuery.length === 0 || modelQuery.length > 128) {
-    return { status: "invalid" };
+    return { status: "invalid", code: "invalid_model" };
   }
   return { status: "command", modelQuery, effort };
+}
+
+function describeExplicitCommandError(code: ExplicitCommandErrorCode): string {
+  switch (code) {
+    case "command_too_long":
+      return `il comando supera ${String(MAX_EXPLICIT_PROFILE_COMMAND_LENGTH)} caratteri.`;
+    case "invalid_model":
+      return "il nome del modello non è valido.";
+    case "missing_profile_or_effort":
+      return "specifica il modello e l'effort finale.";
+    case "multiline_command":
+      return "il comando deve essere su una sola riga e senza contenuti aggiuntivi.";
+    case "unsupported_effort":
+      return "l'ultimo valore deve essere un effort supportato: none, minimal, low, medium, high, xhigh, ultra o max.";
+  }
+}
+
+function describeExplicitProfileRejection(code: string, message: string): string {
+  switch (code) {
+    case "ambiguous_model":
+      return "il nome del modello corrisponde a più profili; specifica il nome completo.";
+    case "app_server_not_initialized":
+      return "Codex App Server non è inizializzato.";
+    case "handoff_in_progress":
+      return "è già in corso un altro cambio profilo.";
+    case "invalid_catalog_profile":
+      return "il catalogo ha restituito un profilo non valido.";
+    case "invalid_explicit_command":
+      return "il comando non è valido.";
+    case "router_failed":
+      return "il router dei profili non è disponibile dopo un errore interno.";
+    case "thread_mismatch":
+      return "il comando riguarda un thread diverso da quello attivo.";
+    case "turn_in_progress":
+      return "attendi il completamento del turno corrente.";
+    case "unsupported_effort":
+      return "l'effort richiesto non è supportato dal modello selezionato.";
+    case "unsupported_model":
+      return "il modello richiesto non è disponibile o il nome è incompleto.";
+    default:
+      return sanitizeProfileError(message);
+  }
+}
+
+function sanitizeProfileError(message: string): string {
+  const sanitized = message
+    .replace(/[\p{Cc}\p{Cf}\u2028\u2029]+/gu, " ")
+    .replace(/\s+/gu, " ")
+    .trim()
+    .slice(0, 256);
+  return sanitized === "" ? "operazione rifiutata dal router." : sanitized;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
