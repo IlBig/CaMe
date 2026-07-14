@@ -9,6 +9,8 @@ import {
   CAME_RUNTIME_DIR_ENV,
   CAME_SESSION_ID_ENV,
   CAME_TUI_AUTH_TOKEN_ENV,
+  CAME_CONTROL_SOCKET_ENV,
+  CAME_CONTROL_TOKEN_ENV,
   SessionGatewayError,
   SessionRuntime,
   type SpawnAppServerOptions,
@@ -71,12 +73,16 @@ function createRuntimeHarness(options: {
     }
     const token = env[tokenName];
     const runtimeDir = env[CAME_RUNTIME_DIR_ENV];
-    if (token === undefined || runtimeDir === undefined) {
+    const controlSocket = env[CAME_CONTROL_SOCKET_ENV];
+    const controlToken = env[CAME_CONTROL_TOKEN_ENV];
+    if (token === undefined || runtimeDir === undefined || controlSocket === undefined || controlToken === undefined) {
       throw new Error("Missing runtime environment");
     }
     runtimeDirs.push(runtimeDir);
     tuiEnvironments.push(env);
     expect(statSync(runtimeDir).mode & 0o777).toBe(0o700);
+    expect(statSync(controlSocket).mode & 0o777).toBe(0o600);
+    expect(controlToken).not.toBe(token);
 
     const script = options.connect === false
       ? KEEP_ALIVE_SCRIPT
@@ -133,6 +139,7 @@ describe("SessionRuntime", () => {
     expect(harness.appOptions).toHaveLength(1);
     expect(harness.appOptions[0]?.env?.[CAME_SESSION_ID_ENV]).toMatch(/^[0-9a-f-]{36}$/u);
     expect(harness.appOptions[0]?.env?.[CAME_TUI_AUTH_TOKEN_ENV]).toBeUndefined();
+    expect(harness.appOptions[0]?.env?.[CAME_CONTROL_TOKEN_ENV]).toBeUndefined();
     expect(harness.tuiEnvironments[0]?.[CAME_SESSION_ID_ENV]).toBe(harness.appOptions[0]?.env?.[CAME_SESSION_ID_ENV]);
     expect(harness.tuiEnvironments[0]?.[CAME_TUI_AUTH_TOKEN_ENV]?.length).toBeGreaterThanOrEqual(32);
     expect(harness.runtimeDirs).toHaveLength(1);

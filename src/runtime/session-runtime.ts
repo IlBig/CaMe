@@ -11,6 +11,12 @@ import {
   spawnCodexAppServer,
 } from "../app-server/process.js";
 import { AppServerConnectionClosedError } from "../app-server/protocol.js";
+import { ControlPlaneServer } from "../control-plane/ipc-server.js";
+import {
+  CAME_CONTROL_SOCKET_ENV,
+  CAME_CONTROL_TOKEN_ENV,
+} from "../control-plane/protocol.js";
+import { HandoffEngine } from "../handoff/handoff-engine.js";
 import {
   SessionGatewayDisconnectedError,
   WebSocketGateway,
@@ -55,6 +61,8 @@ export class SessionRuntime {
   #runtimeDir: string | null = null;
   #appServer: SpawnedAppServer | null = null;
   #gateway: WebSocketGateway | null = null;
+  #controlServer: ControlPlaneServer | null = null;
+  #handoffEngine: HandoffEngine | null = null;
   #tui: ChildProcess | null = null;
   #completion: Deferred<number> | null = null;
   #stopped: Deferred<void> | null = null;
@@ -86,11 +94,13 @@ export class SessionRuntime {
       const cwd = resolve(this.#options.cwd ?? process.cwd());
       const sessionId = randomUUID();
       const authToken = randomBytes(32).toString("base64url");
+      const controlToken = randomBytes(32).toString("base64url");
       this.#runtimeDir = await mkdtemp(join(tmpdir(), "came-"));
       await chmod(this.#runtimeDir, 0o700);
       if (this.#stopRequested) {
         return await this.#completion.promise;
       }
+      const controlSocketPath = join(this.#runtimeDir, "control.sock");
       const appServerEnv: NodeJS.ProcessEnv = {
         ...process.env,
         ...this.#options.env,
@@ -100,6 +110,8 @@ export class SessionRuntime {
       const tuiEnv: NodeJS.ProcessEnv = {
         ...appServerEnv,
         [CAME_TUI_AUTH_TOKEN_ENV]: authToken,
+        [CAME_CONTROL_SOCKET_ENV]: controlSocketPath,
+        [CAME_CONTROL_TOKEN_ENV]: controlToken,
       };
 
       const spawnAppServer = this.#options.spawnAppServer ?? spawnCodexAppServer;
@@ -116,6 +128,26 @@ export class SessionRuntime {
       }
       this.#appServer = spawnAppServer(appServerOptions);
       this.#appServer.bridge.onClose((error) => this.#fail(new SessionRuntimeError("Codex App Server stopped", { cause: error })));
+
+      this.#handoffEngine = new HandoffEngine({
+        sessionId,
+        bridge: this.#appServer.bridge,
+        onFatalError: (error) => this.#fail(new SessionRuntimeError("Model handoff failed", { cause: error })),
+      });
+      this.#controlServer = new ControlPlaneServer({
+        socketPath: controlSocketPath,
+        sessionId,
+        authToken: controlToken,
+        handler: this.#handoffEngine,
+        onFatalError: (error) => this.#fail(new SessionRuntimeError("MCP control plane failed", { cause: error })),
+      });
+      await this.#controlServer.start();
+      if (this.#terminalError !== null) {
+        throw this.#terminalError;
+      }
+      if (this.#stopRequested) {
+        return await this.#completion.promise;
+      }
 
       this.#gateway = new WebSocketGateway(
         this.#appServer.bridge,
@@ -257,6 +289,15 @@ export class SessionRuntime {
       errors.push(asError(error));
     }
     this.#tui = null;
+
+    try {
+      await this.#controlServer?.close();
+    } catch (error) {
+      errors.push(asError(error));
+    }
+    this.#controlServer = null;
+    this.#handoffEngine?.close();
+    this.#handoffEngine = null;
 
     try {
       this.#appServer?.bridge.close(new AppServerConnectionClosedError("CaMe session stopped"));
