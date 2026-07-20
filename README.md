@@ -1,39 +1,39 @@
 # CaMe
 
-CaMe abilita il cambio autonomo e governato di modello e reasoning effort nella stessa sessione Codex.
+CaMe enables autonomous, governed model and reasoning-effort switching within the same Codex session.
 
-## Requisiti
+## Requirements
 
-- macOS o Linux
-- Node.js 24 o superiore
-- Codex CLI con supporto `--remote`
-- pnpm oppure corepack
+- macOS or Linux
+- Node.js 24 or later
+- Codex CLI with `--remote` support
+- pnpm or corepack
 
-## Installazione
+## Installation
 
-Dalla directory del repository esegui un solo comando:
+From the repository directory, run one command:
 
 ```sh
 ./install.sh
 ```
 
-L'installer compila CaMe, crea un runtime production indipendente dalla checkout, installa i comandi `came` e `came-mcp`, registra il plugin Codex e verifica la configurazione. Installazioni successive aggiornano CaMe in modo idempotente.
+The installer builds CaMe, creates a production runtime independent of the source checkout, installs the `came` and `came-mcp` commands, registers the Codex plugin, and verifies the configuration. Subsequent installations update CaMe idempotently.
 
-Avvia quindi Codex attraverso CaMe:
+Then start Codex through CaMe:
 
 ```sh
 came
 ```
 
-All'interno della sessione puoi richiedere esplicitamente un profilo, per esempio:
+Within the session, you can explicitly request a profile, for example:
 
 ```text
-cambia modello in gpt-5.5 con effort xhigh
+change model to gpt-5.5 with effort xhigh
 ```
 
-L'agente può inoltre usare il tool MCP di CaMe per cambiare autonomamente profilo tra fasi di lavoro differenti.
+The agent can also use the CaMe MCP tool to switch profiles autonomously between different phases of work.
 
-## Diagnostica
+## Diagnostics
 
 ```sh
 came doctor
