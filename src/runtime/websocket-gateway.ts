@@ -496,7 +496,10 @@ function parseExplicitProfileCommandDetailed(text: string): DetailedParsedExplic
   if (effort === undefined || !EXPLICIT_EFFORTS.has(effort)) {
     return { status: "invalid", code: "unsupported_effort" };
   }
-  const modelQuery = tokens.slice(0, -1).join(" ");
+  const modelQuery = tokens.slice(0, -1)
+    .join(" ")
+    .replace(/(?:^|\s+)(?:con|with)\s+(?:reasoning\s+)?effort$/iu, "")
+    .trim();
   if (modelQuery.length === 0 || modelQuery.length > 128) {
     return { status: "invalid", code: "invalid_model" };
   }

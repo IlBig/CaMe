@@ -3,6 +3,8 @@ import { constants as fsConstants } from "node:fs";
 import { access } from "node:fs/promises";
 import { delimiter, isAbsolute, resolve } from "node:path";
 
+const CAME_PLUGIN_ID = "came@came-local";
+
 export const MINIMUM_NODE_MAJOR = 24;
 export const DIAGNOSTIC_COMMAND_TIMEOUT_MS = 5_000;
 export const DIAGNOSTIC_COMMAND_MAX_BUFFER = 1024 * 1024;
@@ -203,7 +205,7 @@ function checkPluginInstallation(result: DiagnosticCommandResult): DiagnosticChe
     return fail(
       "came.plugin",
       commandFailureMessage(result),
-      "Repair Codex plugin configuration, then install `came@personal`.",
+      `Repair Codex plugin configuration, then install \`${CAME_PLUGIN_ID}\`.`,
     );
   }
   let payload: unknown;
@@ -241,13 +243,13 @@ function checkPluginInstallation(result: DiagnosticCommandResult): DiagnosticChe
     return warn(
       "came.plugin",
       "CaMe Codex plugin is available but not installed",
-      "Run `codex plugin add came@personal`.",
+      `Run \`codex plugin add ${CAME_PLUGIN_ID}\`.`,
     );
   }
   return warn(
     "came.plugin",
     "CaMe Codex plugin is not present in configured marketplaces",
-    "Add the CaMe marketplace, then run `codex plugin add came@personal`.",
+    "Rerun the CaMe installer.",
   );
 }
 
@@ -255,8 +257,12 @@ function findPlugin(value: unknown): Record<string, unknown> | null {
   if (!Array.isArray(value)) {
     return null;
   }
+  const target = value.find((item) => isRecord(item) && item["pluginId"] === CAME_PLUGIN_ID);
+  if (isRecord(target)) {
+    return target;
+  }
   for (const item of value) {
-    if (isRecord(item) && (item["name"] === "came" || item["pluginId"] === "came@personal")) {
+    if (isRecord(item) && item["name"] === "came") {
       return item;
     }
   }

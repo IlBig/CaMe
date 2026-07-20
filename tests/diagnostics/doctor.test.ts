@@ -73,7 +73,7 @@ describe("CaMe diagnostics", () => {
       id: "came.plugin",
       status: "warn",
       message: "CaMe Codex plugin is available but not installed",
-      remediation: "Run `codex plugin add came@personal`.",
+      remediation: "Run `codex plugin add came@came-local`.",
     });
   });
 

@@ -117,6 +117,8 @@ describe("WebSocketGateway", () => {
   it.each([
     ["cambia modello in 5.5 xhigh", { modelQuery: "5.5", effort: "xhigh" }],
     ["cambia modello in 5.6 sol ultra", { modelQuery: "5.6 sol", effort: "ultra" }],
+    ["cambia modello in gpt-5.6-terra con effort xhigh", { modelQuery: "gpt-5.6-terra", effort: "xhigh" }],
+    ["change model to gpt-5.6-terra with reasoning effort high", { modelQuery: "gpt-5.6-terra", effort: "high" }],
     ["Set the model to GPT-5.6-sol HIGH.", { modelQuery: "GPT-5.6-sol", effort: "high" }],
   ])("parses a bounded explicit command: %s", (command, expected) => {
     expect(parseExplicitProfileCommand(command)).toEqual({ status: "command", ...expected });
@@ -126,6 +128,7 @@ describe("WebSocketGateway", () => {
     "cambia modello",
     "cambia modello in 5.6 sol",
     "cambia modello 5.3 codex",
+    "cambia modello in con effort high",
     `cambia modello ${"x".repeat(260)} high`,
   ])("rejects malformed recognized syntax: %s", (command) => {
     expect(parseExplicitProfileCommand(command)).toEqual({ status: "invalid" });

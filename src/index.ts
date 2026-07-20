@@ -8,6 +8,7 @@ export * from "./control-plane/protocol.js";
 export * from "./contracts.js";
 export * from "./diagnostics/doctor.js";
 export * from "./handoff/handoff-engine.js";
+export * from "./install/installer.js";
 export * from "./governance/audit-log.js";
 export * from "./governance/governance-controller.js";
 export * from "./mcp/control-server.js";

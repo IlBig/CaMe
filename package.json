@@ -5,13 +5,15 @@
   "type": "module",
   "bin": {
     "came": "./dist/cli/came.js",
-    "came-mcp": "./dist/cli/came-mcp.js"
+    "came-mcp": "./dist/cli/came-mcp.js",
+    "came-install": "./dist/cli/came-install.js"
   },
   "engines": {
     "node": ">=24.0.0"
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
+    "install:came": "sh ./install.sh",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "test:app-server": "vitest run tests/app-server",
@@ -19,6 +21,7 @@
     "test:governance": "vitest run tests/governance",
     "test:handoff": "vitest run tests/handoff",
     "test:integration": "vitest run tests/integration",
+    "test:install": "vitest run tests/install",
     "test:plugin": "vitest run tests/plugin",
     "test:control-plane": "vitest run tests/control-plane",
     "test:diagnostics": "vitest run tests/diagnostics tests/runtime/came-cli.test.ts",
